@@ -7,6 +7,7 @@ import type { SegmentDTO } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
 import { formatClock } from "./format";
+import { SegmentFlagBadge, SegmentFlagNote, normalizeFlag } from "./segment-flag";
 import { SpeakerTag, type SpeakerStyle } from "./speaker";
 
 /**
@@ -24,8 +25,14 @@ import { SpeakerTag, type SpeakerStyle } from "./speaker";
  *
  * ## 낱말 시각은 어떻게 붙나
  *
- * 모델이 주는 것은 **토큰**별 시각이다(0.08초 눈금, ±0.3초). 낱말은 이미
- * 서버에서 묶어 `words: [{w, t}]` 로 온다.
+ * 지금 물려 있는 모델이 주는 것은 **토큰**별 시각이다(0.08초 눈금, ±0.3초).
+ * 낱말은 이미 서버에서 묶어 `words: [{w, t}]` 로 온다.
+ *
+ * **모든 모델이 시각을 주는 것은 아니다.** sherpa-onnx 의 whisper 갈래는
+ * `timestamps: []` 를 준다(실측). 그때는 모델 서술자의 `timestamps.kind` 가
+ * `"none"` 이 되고, 위쪽이 `wordClick={false}` 를 내려보낸다 — 낱말 클릭을
+ * 접고 **줄 클릭만** 남긴다. 갈 데가 없는데 낱말마다 손가락 모양이 뜨면,
+ * 눌러 보고 아무 일도 안 일어나는 것을 몇 번 겪은 뒤에야 안 된다는 것을 안다.
  *
  * 그런데 화면에 그리는 글(`text`)은 에이전트가 다듬었거나 사람이 고친 것이라
  * 낱말 수가 `words` 와 다를 수 있다. 그때는 **순서 비율로 맞춘다** — 보이는
@@ -81,6 +88,8 @@ export interface SegmentRowProps {
   time: number | null;
   /** 화자 이름 자동완성 목록의 id. */
   speakerListId: string;
+  /** 낱말을 눌러 그 시각으로 갈 수 있나. 모델 서술자에서 온다. */
+  wordClick: boolean;
   onSeek: (t: number) => void;
   onSave: (id: string, patch: { text?: string; speaker?: string | null }) => Promise<void>;
 }
@@ -91,6 +100,7 @@ export const SegmentRow = memo(function SegmentRow({
   active,
   time,
   speakerListId,
+  wordClick,
   onSeek,
   onSave,
 }: SegmentRowProps) {
@@ -103,9 +113,11 @@ export const SegmentRow = memo(function SegmentRow({
   /** Esc 로 접었나. 접을 때 나는 blur 가 저장으로 새지 않게 하는 문지기. */
   const cancelled = useRef(false);
 
+  const flag = useMemo(() => normalizeFlag(segment), [segment]);
+
   const words = useMemo(
-    () => alignWords(segment.text, segment.words, segment.start),
-    [segment.text, segment.words, segment.start],
+    () => (wordClick ? alignWords(segment.text, segment.words, segment.start) : []),
+    [wordClick, segment.text, segment.words, segment.start],
   );
 
   /** 지금 읽고 있는 낱말. 재생 중인 줄에서만 센다. */
@@ -179,6 +191,7 @@ export const SegmentRow = memo(function SegmentRow({
     <div
       id={`seg-${segment.id}`}
       data-segment-row
+      {...(flag ? { "data-flagged": "" } : {})}
       style={rail}
       className={cn(
         "group flex scroll-mt-4 gap-3 py-2 pr-2 pl-3 transition-colors",
@@ -222,6 +235,17 @@ export const SegmentRow = memo(function SegmentRow({
               <Pencil className="h-2.5 w-2.5" />
               고침
             </span>
+          )}
+          {flag && (
+            /*
+              에이전트가 다듬지 않고 **표시만** 한 줄이다.
+
+              이 모델은 못 알아듣는 소리에 빈 글이 아니라 그럴듯한 영어를
+              지어낸다. 그것을 매끄럽게 다듬어 버리면 지어낸 글이 사실처럼
+              남는다. 그래서 다듬는 대신 표시하게 시켰고, 그 표시가 여기 선다 —
+              화면에 안 나오면 시킨 보람이 없다.
+            */
+            <SegmentFlagBadge flag={flag} />
           )}
         </div>
 
@@ -330,24 +354,43 @@ export const SegmentRow = memo(function SegmentRow({
               만 개인데, 낱말마다 처리기를 달면 그만큼의 함수가 메모리에 남고
               다시 그릴 때마다 새로 붙는다. 여기 하나만 두고 눌린 자리에서
               `data-t` 를 거슬러 올라가 찾는다.
+
+              모델이 시각을 안 주면(`wordClick === false`) `data-t` 가 아예
+              없다. 그때는 **줄 머리로** 보낸다 — 이 줄을 누른 사람이 원한
+              것은 "여기부터 듣기" 이고, 그건 시각 단추와 같은 뜻이다.
             */
             onClick={(e) => {
               // 글자를 끌어 고르고 있었으면 재생하지 않는다.
               const sel = typeof window !== "undefined" ? window.getSelection() : null;
               if (sel && !sel.isCollapsed) return;
+              if (!wordClick) {
+                onSeek(segment.start);
+                return;
+              }
               const hit = (e.target as HTMLElement).closest<HTMLElement>("[data-t]");
               if (!hit) return;
               const t = Number(hit.dataset.t);
               if (Number.isFinite(t)) onSeek(t);
             }}
-            className="text-[13.5px] leading-relaxed break-keep text-(--color-fg-2) [overflow-wrap:anywhere]"
+            title={wordClick ? undefined : `${formatClock(segment.start)} 부터 재생`}
+            className={cn(
+              "text-[13.5px] leading-relaxed break-keep text-(--color-fg-2) [overflow-wrap:anywhere]",
+              !wordClick && segment.text.trim() && "cursor-pointer",
+            )}
           >
-            {words.length === 0 ? (
+            {!segment.text.trim() ? (
               /*
                 이 조각에서 옮겨진 말이 없다. 빈 줄로 두면 화면에서 사라져
                 "왜 12:30 다음이 12:52 지" 가 된다. 자리를 남기고 이유를 남긴다.
               */
               <span className="text-[12px] text-(--color-fg-4)">(옮겨진 말 없음)</span>
+            ) : !wordClick ? (
+              /*
+                시각을 낱말 단위로 못 받는 모델. 낱말을 감싸지 않고 통글자로
+                그린다 — 감싸 두면 손가락 모양과 hover 가 "여기를 누르면 그
+                낱말로 간다" 고 약속하는데, 갈 데가 없다.
+              */
+              segment.text
             ) : (
               words.map((w, i) => (
                 <span key={i}>
@@ -369,6 +412,9 @@ export const SegmentRow = memo(function SegmentRow({
             )}
           </p>
         )}
+
+        {/* 표시된 줄에는 왜 표시됐는지와 다음에 할 일을 한 줄로 덧붙인다. */}
+        {!editing && flag && <SegmentFlagNote flag={flag} />}
       </div>
 
       {!editing && (

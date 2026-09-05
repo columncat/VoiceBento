@@ -1,10 +1,10 @@
 "use client";
 
-import { Check, Clock, ListRestart, Pencil, Trash2, X } from "lucide-react";
+import { Check, Clock, Layers, ListRestart, Pencil, Trash2, X } from "lucide-react";
 import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
 
-import type { RecordingDTO } from "@/lib/types";
+import type { RecordingWithSession } from "@/lib/types";
 import { cn, formatRelativeTime } from "@/lib/utils";
 
 import { formatLength } from "./format";
@@ -26,11 +26,24 @@ import { JobProgress, StateBadge, isBusy } from "./job-state";
  */
 export function RecordingCard({
   recording,
+  rtf,
+  sessionName,
   onRename,
   onDelete,
   onRetranscribe,
 }: {
-  recording: RecordingDTO;
+  recording: RecordingWithSession;
+  /** 모델 서술자의 실시간 대비 배수. 걸릴 시간 어림에 쓴다. */
+  /** 재 본 적이 없는 모델이면 null 로 온다 — 그때는 어림을 안 적는다. */
+  rtf?: number | null;
+  /**
+   * 어느 세션의 것인지.
+   *
+   * **묶어 보는 화면에서는 안 넘긴다** — 바로 위 머리말에 이미 적혀 있는데
+   * 카드마다 한 번씩 더 적으면 격자가 같은 글자로 뒤덮인다. 시간순으로 볼
+   * 때만 넘어온다.
+   */
+  sessionName?: string | null;
   onRename: (id: string, title: string) => Promise<void>;
   onDelete: (id: string) => Promise<void>;
   onRetranscribe: (id: string) => Promise<void>;
@@ -162,10 +175,19 @@ export function RecordingCard({
             <span title={new Date(recording.createdAt).toLocaleString("ko-KR")}>
               {formatRelativeTime(new Date(recording.createdAt).getTime())}
             </span>
+            {sessionName && (
+              <span
+                className="flex min-w-0 items-center gap-1 rounded-full bg-(--color-bg-2) px-1.5 py-0.5 text-[10px] text-(--color-fg-3)"
+                title={`세션 "${sessionName}" — 다듬기·대화·요약이 이 세션에서 돕니다`}
+              >
+                <Layers className="h-2.5 w-2.5 shrink-0" />
+                <span className="truncate">{sessionName}</span>
+              </span>
+            )}
           </p>
 
           {busy ? (
-            <JobProgress recording={recording} className="mt-1" />
+            <JobProgress recording={recording} rtf={rtf} className="mt-1" />
           ) : (
             <div className="mt-1">
               <StateBadge state={recording.state} />

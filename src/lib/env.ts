@@ -11,6 +11,8 @@
  */
 import { z } from "zod";
 
+import { DEFAULT_MODEL_ID, getModel } from "./asr-models";
+
 const envSchema = z.object({
   DATABASE_PATH: z.string().default("./data/voicebento.db"),
 
@@ -51,6 +53,19 @@ const envSchema = z.object({
    * 없고, 이미 호스트가 받아 둔 671MB 를 한 번 더 받을 이유도 없다.
    */
   ASR_MODEL_DIR: z.string().optional(),
+
+  /**
+   * 어느 전사 모델을 쓰는가. 서술자의 id (`scripts/asr-models.json`).
+   *
+   * 비우면 표의 기본값(parakeet)이다. **모르는 id 를 적으면 앱이 뜨지
+   * 않는다** — 조용히 기본값으로 떨어지면, 한국어 모델을 붙였다고 믿는
+   * 사람이 여전히 한국어를 못 하는 앱을 쓰게 되고 그 사실이 화면 어디에도
+   * 안 나온다 (`asr-models.ts` 의 `getModel`).
+   *
+   * 모델 **파일**은 이 값과 무관하게 `ASR_MODEL_DIR`/`MODEL_DIR` 에서 찾는다.
+   * 서술자는 그 폴더 **안의 파일 이름**만 정한다.
+   */
+  ASR_MODEL_ID: z.string().trim().optional(),
 
   /**
    * silero VAD 파일. 없으면 모델 폴더 안에서 찾는다.
@@ -147,8 +162,13 @@ const envSchema = z.object({
    * 위의 실측 그대로 4가 가장 빠르다. 8은 2보다도 느리다(물리 4코어에
    * 논리 8이라 하이퍼스레드끼리 캐시를 두고 싸운다). 다른 기계에 옮길 때만
    * 손댈 값이라 열어는 둔다.
+   *
+   * **기본값을 여기 적지 않는다.** 적정 스레드 수는 모델의 성질이라
+   * 서술자에 있다 (`asr-models.json` 의 `defaultThreads`). 여기에 `4` 를
+   * 박아 두면 다른 모델을 붙였을 때 그 모델의 값이 조용히 무시된다.
+   * 비워 두는 것이 "서술자에게 맡긴다" 는 뜻이다.
    */
-  ASR_NUM_THREADS: z.coerce.number().int().min(1).max(16).default(4),
+  ASR_NUM_THREADS: z.coerce.number().int().min(1).max(16).optional(),
 
   /**
    * 위와 같은 값의 다른 이름. **설치 마법사가 적는 것이 이쪽이다.**
@@ -180,6 +200,27 @@ const envSchema = z.object({
    * 그렇다고 말한다** (`/polish` 가 413 을 준다).
    */
   AGENT_MAX_BODY_KB: z.coerce.number().int().positive().default(512),
+
+  /**
+   * 세션 하나가 에이전트 맥락에 부을 수 있는 글자 수의 상한.
+   *
+   * ## 왜 상한이 필요한가
+   *
+   * 세션은 claude 세션 하나에 `--resume` 으로 이어 붙는다. 녹음을 더할
+   * 때마다, 대화를 한 번 주고받을 때마다 그 세션의 기록이 길어지고, 그것은
+   * **줄어들지 않는다.** 언젠가 모델의 맥락 창을 넘고, 그때 나는 오류는
+   * "이 세션은 너무 큽니다" 가 아니라 CLI 가 뱉는 알아볼 수 없는 실패다.
+   *
+   * ## 왜 600,000 인가
+   *
+   * 영어는 4글자쯤이 토큰 하나다 — 60만 자면 15만 토큰쯤이고, 답과 안내문이
+   * 얹힐 자리를 남긴 값이다. 한 시간짜리 녹음의 전사문이 4만 자쯤이므로
+   * (`lib/agent.ts`), 주간 회의를 열 번 넘게 쌓아도 닿지 않는다.
+   *
+   * **넘으면 조용히 자르지 않는다.** 세는 곳과 거절하는 곳은
+   * `lib/session-server.ts` 에 있다.
+   */
+  SESSION_CONTEXT_CHARS: z.coerce.number().int().positive().default(600_000),
 
   // ── 인증 ───────────────────────────────────────────────────
   /**
@@ -215,5 +256,21 @@ export const modelPaths = (() => {
   return { dir, vad, managed };
 })();
 
-/** 조각마다 쓸 스레드 수. 마법사가 적는 `ASR_THREADS` 가 먼저다. */
-export const asrThreads = env.ASR_THREADS ?? env.ASR_NUM_THREADS;
+/**
+ * 지금 쓰는 전사 모델의 서술자. **모델의 성질을 묻는 곳은 여기 하나다.**
+ *
+ * 모듈 껍데기에서 한 번 읽는다 — 서술자의 불변식 검사(`assertModel`)가 그때
+ * 돈다. 어긋나 있으면 앱이 안 뜨고, 그 편이 전사가 조용히 틀린 글을 내는
+ * 것보다 낫다 (`asr-models.ts` 의 설명).
+ */
+export const asrModel = getModel(env.ASR_MODEL_ID || DEFAULT_MODEL_ID);
+
+/**
+ * 조각마다 쓸 스레드 수.
+ *
+ * 순서가 셋이다: 설치 마법사가 적는 `ASR_THREADS` → 사람이 적은
+ * `ASR_NUM_THREADS` → **서술자의 기본값.** 마지막을 서술자에 둔 것은 적정
+ * 스레드 수가 기계가 아니라 모델의 성질이기 때문이다.
+ */
+export const asrThreads =
+  env.ASR_THREADS ?? env.ASR_NUM_THREADS ?? asrModel.runtime.defaultThreads;

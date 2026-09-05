@@ -98,9 +98,13 @@ export function StateBadge({ state, className }: { state: JobState; className?: 
  */
 export function JobProgress({
   recording,
+  rtf,
   className,
 }: {
   recording: RecordingDTO;
+  /** 모델 서술자의 실시간 대비 배수. 걸릴 시간을 이걸로 어림한다. */
+  /** 모델을 재 본 적이 없으면 null·undefined 로 온다 — 그때는 어림을 안 적는다. */
+  rtf?: number | null;
   className?: string;
 }) {
   if (!isBusy(recording.state)) return null;
@@ -108,7 +112,10 @@ export function JobProgress({
   const pct = hasPercent(recording)
     ? Math.max(0, Math.min(100, Math.round((recording.progress ?? 0) * 100)))
     : null;
-  const eta = recording.state === "transcribing" ? estimateTranscribe(recording.duration) : null;
+  const eta =
+    recording.state === "transcribing" && typeof rtf === "number"
+      ? estimateTranscribe(recording.duration, rtf)
+      : null;
 
   return (
     <div className={cn("flex flex-col gap-1", className)}>

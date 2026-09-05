@@ -2,6 +2,13 @@
 /**
  * 전사 모델을 볼륨에 내려받는다. 이미 있으면 아무것도 안 한다.
  *
+ * ## 무엇을 받나 — **서술자가 정한다**
+ *
+ * 주소도 크기도 sha256 도 여기 박혀 있지 않다. 옆의 `asr-models.json` 에서
+ * 읽는다 (`ASR_MODEL_ID` 가 고르고, 비면 표의 기본값). 그 파일이 앱과 워커와
+ * 이 스크립트가 함께 보는 **하나의 자리**다 — 모델을 갈아 끼울 때 고칠 곳이
+ * 하나여야 한다.
+ *
  * ## 왜 이미지에 굽지 않는가
  *
  * 풀면 671MB 다. 런타임 이미지가 562MB 에서 1.7GB 로 뛴다 — 형제 앱들이
@@ -23,11 +30,12 @@
 
 import { createHash } from "node:crypto";
 import { spawn } from "node:child_process";
-import { createWriteStream, existsSync } from "node:fs";
+import { createWriteStream, existsSync, readFileSync } from "node:fs";
 import { mkdir, rename, rm, stat } from "node:fs/promises";
 import { basename, join, resolve } from "node:path";
 import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
+import { fileURLToPath } from "node:url";
 
 /*
  * 자리가 둘이다. **`src/lib/env.ts` 의 `modelPaths` 와 같은 규칙이어야 한다.**
@@ -47,33 +55,46 @@ const EXTERNAL_DIR = process.env.ASR_MODEL_DIR?.trim();
 const MODEL_DIR = resolve(EXTERNAL_DIR || process.env.MODEL_DIR || "./data/models");
 const EXTERNAL_VAD = process.env.VAD_MODEL_PATH?.trim();
 
-/**
- * 받아야 할 것 둘.
- *
- * 크기와 sha256 은 uno 에서 실제로 받아 확인한 값이다. **둘 다 검사한다** —
- * 크기만 보면 앞단이 끼워 넣은 오류 페이지가 우연히 같은 크기일 수 있고,
- * 해시만 보면 671MB 를 다 받고 나서야 잘못된 것을 안다.
- */
-const ARCHIVE = {
-  url:
-    "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/" +
-    "sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8.tar.bz2",
-  size: 487_170_055,
-  sha256: "5793d0fd397c5778d2cf2126994d58e9d56b1be7c04d13c7a15bb1b4eafb16bf",
-  /** 풀면 이 파일들이 나온다. 하나라도 없으면 받은 것으로 치지 않는다. */
-  produces: ["encoder.int8.onnx", "decoder.int8.onnx", "joiner.int8.onnx", "tokens.txt"],
-};
-
-const VAD = {
-  url: "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/silero_vad.onnx",
-  size: 643_854,
-  sha256: "9e2449e1087496d8d4caba907f23e0bd3f78d91fa552479bb9c23ac09cbb1fd6",
-  name: "silero_vad.onnx",
-};
-
 function log(...args) {
   console.log("[fetch-model]", ...args);
 }
+
+/**
+ * 서술자 표. **앱·워커와 같은 파일을 읽는다.**
+ *
+ * 크기와 sha256 은 실제로 받아 확인한 값이다. **둘 다 검사한다** —
+ * 크기만 보면 앞단이 끼워 넣은 오류 페이지가 우연히 같은 크기일 수 있고,
+ * 해시만 보면 671MB 를 다 받고 나서야 잘못된 것을 안다.
+ */
+const TABLE = JSON.parse(
+  readFileSync(join(fileURLToPath(new URL(".", import.meta.url)), "asr-models.json"), "utf8"),
+);
+
+const MODEL_ID = process.env.ASR_MODEL_ID?.trim() || TABLE.default;
+const MODEL = TABLE.models[MODEL_ID];
+if (!MODEL) {
+  console.error(
+    `[fetch-model] 모르는 모델 id 입니다: "${MODEL_ID}". ` +
+      `아는 것: ${Object.keys(TABLE.models).join(", ")} (scripts/asr-models.json)`,
+  );
+  process.exit(1);
+}
+
+/**
+ * 받을 것과, 풀면 나와야 하는 파일들.
+ *
+ * `produces` 를 손으로 적지 않는다 — 서술자의 `runtime.files` 가 이미 그
+ * 목록이다. 두 벌로 두면 모델을 바꾸며 한쪽만 고치는 날이 오고, 그러면
+ * "받았다" 고 하고서 워커가 "파일이 없습니다" 로 죽는다.
+ */
+const ARCHIVE = MODEL.download?.archive
+  ? {
+      ...MODEL.download.archive,
+      produces: Object.values(MODEL.runtime.files),
+    }
+  : null;
+
+const VAD = { ...TABLE.vad };
 
 /**
  * 내려받으면서 해시를 함께 센다.
@@ -180,7 +201,8 @@ async function fileHasSize(path, size) {
  * 운 나쁘게 쓰기가 되는 배포에서는 같은 671MB 가 두 벌이 된다.
  */
 async function checkExternal() {
-  const missing = ARCHIVE.produces.filter((f) => !existsSync(join(MODEL_DIR, f)));
+  const expected = Object.values(MODEL.runtime.files);
+  const missing = expected.filter((f) => !existsSync(join(MODEL_DIR, f)));
   const vadPath = EXTERNAL_VAD ? resolve(EXTERNAL_VAD) : join(MODEL_DIR, VAD.name);
   if (!existsSync(vadPath)) missing.push(vadPath);
 
@@ -196,14 +218,29 @@ async function checkExternal() {
 }
 
 async function main() {
+  log(`모델: ${MODEL.name} (${MODEL_ID})`);
   if (EXTERNAL_DIR) return checkExternal();
 
   await mkdir(MODEL_DIR, { recursive: true });
 
   // ── 모델 본체 ──
-  const haveModel = ARCHIVE.produces.every((f) => existsSync(join(MODEL_DIR, f)));
+  const expected = Object.values(MODEL.runtime.files);
+  const haveModel = expected.every((f) => existsSync(join(MODEL_DIR, f)));
   if (haveModel) {
     log("모델이 이미 있습니다. 건너뜁니다.");
+  } else if (!ARCHIVE) {
+    /*
+     * 내려받기 표에 없는 모델이다. **여기서 지어내지 않는다.**
+     *
+     * 주소와 크기와 sha256 은 실제로 받아 확인한 값이어야 한다. 짐작해서
+     * 적으면 검사가 통과하는 것이 아니라 **검사가 거짓말이 된다** — 엉뚱한
+     * 파일을 받고도 "확인했습니다" 가 뜬다. 그러니 없으면 없다고 말한다.
+     */
+    throw new Error(
+      `"${MODEL_ID}" 는 자동으로 받는 표에 없습니다. 파일을 ${MODEL_DIR} 에 손으로 넣거나, ` +
+        `scripts/asr-models.json 의 download 칸에 실제로 받아 확인한 주소·크기·sha256 을 ` +
+        `적어 주세요. 필요한 파일: ${expected.join(", ")}`,
+    );
   } else {
     const archive = join(MODEL_DIR, "model.tar.bz2");
     if (!(await fileHasSize(archive, ARCHIVE.size))) {
@@ -211,7 +248,7 @@ async function main() {
     } else {
       log("내려받은 묶음이 이미 있습니다. 푸는 것만 다시 합니다.");
     }
-    log("푸는 중… (671MB)");
+    log(`푸는 중… (${ARCHIVE.unpackedLabel ?? "…"})`);
     await extract(archive, MODEL_DIR);
     // 다 풀었으면 묶음은 필요 없다. 487MB 를 볼륨에 남겨 둘 이유가 없다.
     await rm(archive, { force: true });

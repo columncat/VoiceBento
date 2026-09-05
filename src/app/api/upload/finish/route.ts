@@ -3,7 +3,13 @@ import { z } from "zod";
 
 import { logAgent } from "@/lib/agent-log";
 import { MemoBentoError, cancelUpload, finishUpload } from "@/lib/memobento";
-import { createRecording, toRecordingDTO } from "@/lib/recording-server";
+import { createRecording, withSession } from "@/lib/recording-server";
+import {
+  MAX_SESSION_NAME,
+  SessionPickError,
+  resolveSessionPick,
+  sessionOfRecording,
+} from "@/lib/session-server";
 import { enqueue } from "@/lib/transcribe";
 import { discard, loadSession } from "@/lib/upload-session";
 
@@ -24,6 +30,16 @@ const bodySchema = z.object({
   uploadId: z.string().min(1),
   /** 등록할 때 미리 적었다면. 비면 파일 이름이 제목이 된다. */
   title: z.string().trim().max(500).optional(),
+
+  /**
+   * 어느 세션에서 처리할지. **둘 중 하나만.** 둘 다 없으면 세션 없이 둔다.
+   *
+   * `uploadId` 의 "업로드 세션" 과 이름이 겹치지만 아무 상관이 없는 것이다.
+   * 저쪽은 조각을 이어 붙이는 동안만 사는 임시 자리이고, 이쪽은 녹음이
+   * 처리될 대화 자루다. 아래에서 변수 이름을 갈라 부르는 이유가 그것이다.
+   */
+  sessionId: z.string().trim().min(1).optional(),
+  newSessionName: z.string().trim().min(1).max(MAX_SESSION_NAME).optional(),
 });
 
 export async function POST(req: Request) {
@@ -35,6 +51,26 @@ export async function POST(req: Request) {
   const session = await loadSession(parsed.data.uploadId);
   if (!session) {
     return NextResponse.json({ error: "업로드 세션을 찾을 수 없습니다" }, { status: 404 });
+  }
+
+  /*
+   * 대화 자루를 **파일을 확정하기 전에** 정한다.
+   *
+   * 고른 세션이 사라졌으면 여기서 400 이 나고, 저쪽 임시 파일은 그대로 남아
+   * 사람이 다시 시도할 수 있다. 반대로 했다면 파일은 확정되고 세션만 안
+   * 붙어, 사람은 이어 붙였다고 믿는데 실제로는 따로 노는 녹음이 남는다.
+   */
+  let voiceSessionId: string | null;
+  try {
+    voiceSessionId = resolveSessionPick({
+      sessionId: parsed.data.sessionId,
+      newSessionName: parsed.data.newSessionName,
+    });
+  } catch (e) {
+    if (e instanceof SessionPickError) {
+      return NextResponse.json({ error: e.message }, { status: 400 });
+    }
+    throw e;
   }
 
   // 브라우저가 경로째 보내는 경우가 있다 (폴더 드래그). 마지막 조각만 이름으로 쓴다.
@@ -60,9 +96,15 @@ export async function POST(req: Request) {
     fileId,
     sourceName: name,
     sourceSize: session.size,
+    sessionId: voiceSessionId,
   });
 
-  logAgent(req, "녹음 올리기", title, { file: name, size: session.size, fileId });
+  logAgent(req, "녹음 올리기", title, {
+    file: name,
+    size: session.size,
+    fileId,
+    sessionId: voiceSessionId,
+  });
 
   /*
    * 줄에 넣고 **기다리지 않는다.**
@@ -72,7 +114,10 @@ export async function POST(req: Request) {
    */
   enqueue(row.id);
 
-  return NextResponse.json({ recording: toRecordingDTO(row), fileId });
+  return NextResponse.json({
+    recording: withSession(row, sessionOfRecording(row)?.name ?? null),
+    fileId,
+  });
 }
 
 /** 사용자가 취소한 업로드 정리. 저쪽 임시 파일도 함께 치운다. */

@@ -1,0 +1,157 @@
+{
+  "$comment": [
+    "전사 모델 서술자 — **이 앱에서 모델의 성질을 적어 두는 유일한 자리다.**",
+    "여기 있는 것은 사실뿐이고, 그 사실로 만드는 문장과 '왜' 는 src/lib/asr-models.ts 에 있다.",
+    "이 파일이 scripts/ 에 있는 이유: 런타임 이미지에 복사되는 것이 scripts/ 라",
+    "(Dockerfile 의 `COPY --from=builder /app/scripts ./scripts`) 워커와 내려받기 스크립트가",
+    "여기서 읽을 수 있다. src/ 는 이미지에 없다.",
+    "JSON 이라 주석을 못 다는 대신 이 칸에 적는다. 읽는 쪽은 이 키를 무시한다."
+  ],
+
+  "default": "parakeet-tdt-0.6b-v3-int8",
+
+  "models": {
+    "parakeet-tdt-0.6b-v3-int8": {
+      "id": "parakeet-tdt-0.6b-v3-int8",
+      "name": "parakeet-tdt-0.6b-v3 (int8)",
+      "dirName": "sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8",
+
+      "runtime": {
+        "id": "parakeet-tdt-0.6b-v3-int8",
+        "kind": "transducer",
+        "modelType": "nemo_transducer",
+        "files": {
+          "encoder": "encoder.int8.onnx",
+          "decoder": "decoder.int8.onnx",
+          "joiner": "joiner.int8.onnx",
+          "tokens": "tokens.txt"
+        },
+        "sampleRate": 16000,
+        "featureDim": 80,
+        "defaultThreads": 4,
+        "maxAudioSeconds": 400,
+        "timestamps": "token",
+        "vad": {
+          "threshold": 0.5,
+          "minSilenceDuration": 0.5,
+          "minSpeechDuration": 0.25,
+          "maxSpeechDuration": 30,
+          "windowSize": 512
+        }
+      },
+
+      "timestampResolution": 0.08,
+      "rtf": 0.096,
+      "minCharsPerSecond": 5,
+      "hallucinatesOnUnsupported": true,
+
+      "languages": [
+        "en", "es", "fr", "de", "bg", "hr", "cs", "da", "nl", "et", "el",
+        "fi", "hu", "it", "lv", "lt", "mt", "pl", "pt", "ro", "sk", "sl",
+        "sv", "ru", "uk"
+      ],
+      "languagesLabel": "영어를 비롯한 유럽 25개 언어",
+      "languagesLong": "영어·독일어·프랑스어·스페인어·이탈리아어·러시아어를 비롯한 유럽어 25개",
+
+      "agentNotes": [
+        "이 모델은 못 알아듣는 소리(지원 목록 밖의 말·잡음·음악)에 빈 글이 아니라 **그럴듯한 영어를 지어낸다.** 실제로 한국어 오디오에 \"Here's snucker, your foo's nick…\" 같은 글이 나온 적이 있다. 뜻이 통하지 않거나 앞뒤와 아무 상관이 없는 영어는 사람이 한 말이 아니라 기계가 지어낸 것일 수 있다."
+      ],
+
+      "attribution": "전사 모델: NVIDIA parakeet-tdt-0.6b-v3 (CC-BY-4.0), sherpa-onnx 로 내보낸 int8 판본 (Apache-2.0).",
+      "credit": {
+        "weights": "nvidia/parakeet-tdt-0.6b-v3",
+        "weightsLicense": "CC-BY-4.0",
+        "export": "sherpa-onnx",
+        "exportLicense": "Apache-2.0"
+      },
+
+      "download": {
+        "archive": {
+          "url": "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8.tar.bz2",
+          "size": 487170055,
+          "sha256": "5793d0fd397c5778d2cf2126994d58e9d56b1be7c04d13c7a15bb1b4eafb16bf",
+          "unpackedLabel": "671MB"
+        }
+      }
+    },
+
+    "whisper-small-int8": {
+      "$comment": [
+        "**아직 아무도 이것을 쓰지 않는다.** 여기 있는 이유는 하나 — 서술자 하나를",
+        "더하는 것으로 다른 모델이 실제로 붙는지 확인하는 자리다.",
+        "골자는 `timestamps: \"none\"` 이다. sherpa-onnx 의 whisper 는 낱말 시각을",
+        "**전혀 주지 않는다** (`result.timestamps` 가 빈 배열이다 — 실측). 그래서 이",
+        "모델을 고르면 낱말 클릭이 접히고 줄 클릭만 남는다. 그 갈래가 코드에 실제로 있다:",
+        "scripts/transcribe.mjs 의 어댑터와 src/lib/model.ts 의 `timestamps` 칸.",
+        "whisper 는 30초 창으로 도는 모델이라 `maxAudioSeconds` 가 30이고,",
+        "VAD 의 `maxSpeechDuration` 은 그보다 작아야 한다 (asr-models.ts 의 불변식).",
+        "`download` 가 null 인 것은 게으름이 아니라 정직이다 — 실제로 받아 크기와",
+        "sha256 을 확인하기 전에는 그 두 숫자를 적지 않는다. 지어낸 해시는 검사를",
+        "통과시키는 것이 아니라 검사를 거짓말로 만든다."
+      ],
+
+      "id": "whisper-small-int8",
+      "name": "whisper-small (int8)",
+      "dirName": "sherpa-onnx-whisper-small",
+
+      "runtime": {
+        "id": "whisper-small-int8",
+        "kind": "whisper",
+        "modelType": "whisper",
+        "files": {
+          "encoder": "small-encoder.int8.onnx",
+          "decoder": "small-decoder.int8.onnx",
+          "tokens": "small-tokens.txt"
+        },
+        "sampleRate": 16000,
+        "featureDim": 80,
+        "defaultThreads": 4,
+        "maxAudioSeconds": 30,
+        "timestamps": "none",
+        "vad": {
+          "threshold": 0.5,
+          "minSilenceDuration": 0.5,
+          "minSpeechDuration": 0.25,
+          "maxSpeechDuration": 25,
+          "windowSize": 512
+        }
+      },
+
+      "timestampResolution": null,
+      "rtf": null,
+      "minCharsPerSecond": 2,
+      "hallucinatesOnUnsupported": true,
+
+      "languages": [
+        "en", "ko", "ja", "zh", "es", "fr", "de", "it", "pt", "ru", "nl",
+        "pl", "tr", "sv", "da", "fi", "cs", "el", "hu", "ro", "uk", "vi",
+        "id", "th", "ar", "he", "hi"
+      ],
+      "languagesLabel": "한국어를 포함한 여러 언어",
+      "languagesLong": "한국어·영어·일본어·중국어를 비롯한 여러 언어",
+
+      "agentNotes": [
+        "이 모델은 낱말별 시각을 주지 않는다. 조각의 시작·끝만 믿을 수 있다.",
+        "whisper 는 침묵 구간에서 같은 문장을 되풀이하거나 자막 광고 문구를 지어내는 것으로 알려져 있다. 앞뒤와 무관하게 되풀이되는 줄은 표시해라."
+      ],
+
+      "attribution": "전사 모델: OpenAI Whisper small (MIT), sherpa-onnx 로 내보낸 int8 판본 (Apache-2.0).",
+      "credit": {
+        "weights": "openai/whisper-small",
+        "weightsLicense": "MIT",
+        "export": "sherpa-onnx",
+        "exportLicense": "Apache-2.0"
+      },
+
+      "download": null
+    }
+  },
+
+  "vad": {
+    "$comment": "silero VAD 는 모델과 따로 산다. 스택 배포에서는 모델 폴더 밖에 있다 (env.ts 의 modelPaths).",
+    "name": "silero_vad.onnx",
+    "url": "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/silero_vad.onnx",
+    "size": 643854,
+    "sha256": "9e2449e1087496d8d4caba907f23e0bd3f78d91fa552479bb9c23ac09cbb1fd6"
+  }
+}

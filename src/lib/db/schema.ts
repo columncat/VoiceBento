@@ -30,10 +30,99 @@ export type SummarySource = (typeof SUMMARY_SOURCES)[number];
 export const RUN_STATES = ["running", "done", "failed"] as const;
 export type RunState = (typeof RUN_STATES)[number];
 
+/**
+ * 다듬기가 한 줄에 붙일 수 있는 표시.
+ *
+ * `lib/asr-models.ts` 의 `SEGMENT_FLAGS` 와 **같은 값이어야 한다.** 저쪽이
+ * 계약(에이전트에게 시키는 말과 허용목록)이고 여기는 drizzle 의 타입이다.
+ * 늘리려면 둘을 함께 고쳐야 한다 — `JOB_STATES` 와 같은 관례다.
+ *
+ * SQLite 쪽에 CHECK 를 걸지 않는 것은 형제 칸(`state`·`source`)과 맞추려는
+ * 것이다. 걸러 내는 문은 `lib/agent.ts` 의 허용목록 하나이고, 그 문이
+ * 열리는 날 DB 가 대신 막아 주는 것보다 **한 조각이 아니라 다듬기 전체가
+ * 트랜잭션째 날아가는 쪽**이 더 나쁘다.
+ */
+export const SEGMENT_FLAGS = [
+  "other-language",
+  "hallucinated",
+  "unclear",
+  "cut-off",
+] as const;
+export type SegmentFlag = (typeof SEGMENT_FLAGS)[number];
+
 const stamp = (name: string) =>
   integer(name, { mode: "timestamp" })
     .notNull()
     .default(sql`(unixepoch())`);
+
+// ─────────────────────────────────────────────────────────────
+//   세션 — 녹음 여럿이 한 맥락을 나눠 쓴다
+// ─────────────────────────────────────────────────────────────
+
+/**
+ * 세션 한 건.
+ *
+ * ## 왜 녹음과 갈랐나
+ *
+ * 예전에는 녹음 하나가 곧 세션이었다 — 에이전트를 부를 때마다 `recordingId`
+ * 로 세션을 잡았고, 다듬기는 아예 일회용(`ephemeral`)이었다. 그래서 방금
+ * 다듬으며 정한 화자 이름과 용어를 대화창이 몰랐고, 지난주 회의에서 배운
+ * 것을 이번 주 회의가 물려받을 길이 없었다.
+ *
+ * 세션을 일급으로 두면 그 둘이 한 번에 풀린다. 값은 되풀이되는 자리에서
+ * 나온다 — 같은 사람, 같은 용어, 같은 화자 이름.
+ *
+ * ## `agent_key` 를 왜 id 와 따로 두나
+ *
+ * 이 값이 BentoAgent 쪽 claude 세션의 열쇠다. id 와 같아도 될 것 같지만
+ * **갈아 끼울 수 있어야 한다.** 맥락이 상한에 닿으면 사람은 이 세션의
+ * 이름과 녹음 목록은 그대로 두고 에이전트 맥락만 새로 시작하고 싶어 한다
+ * (`rollover`). 그때 바꾸는 것이 이 칸이다. id 를 바꾸면 붙어 있는 녹음이
+ * 전부 떨어진다.
+ *
+ * 모양은 `[A-Za-z0-9_-]{1,64}` 여야 한다 — 저쪽 `isChatKey` 가 그것만 받는다.
+ * 앞에 `s-` 를 붙이는 이유는 `session-server.ts` 에 적어 두었다.
+ */
+export const sessions = sqliteTable(
+  "sessions",
+  {
+    id: text("id").primaryKey(),
+    /** 사람이 붙이는 이름. "주간 회의" 처럼. */
+    name: text("name").notNull(),
+
+    /** BentoAgent 의 claude 세션 열쇠. 위 설명을 보라. */
+    agentKey: text("agent_key").notNull(),
+
+    /**
+     * 지금까지 이 세션의 에이전트 맥락에 부은 글자 수.
+     *
+     * 다듬기에 넘긴 전사문과 대화에 매 턴 싣는 전사문을 더해 센다. 그
+     * 맥락은 `--resume` 으로 이어 붙으므로 **줄어들지 않는다.** 상한을 넘으면
+     * 거절한다 (`lib/session-server.ts`). 조용히 자르지 않는다.
+     *
+     * `rollover` 로 열쇠를 갈면 0 으로 돌아간다 — 새 claude 세션이니까.
+     */
+    contextChars: integer("context_chars").notNull().default(0),
+
+    createdAt: stamp("created_at"),
+    updatedAt: stamp("updated_at"),
+  },
+  (t) => ({
+    /** 목록은 최근에 손댄 순이다. 올릴 때 고르는 칸이 그 순서로 뜬다. */
+    byUpdated: index("sessions_updated_idx").on(t.updatedAt),
+    /**
+     * 열쇠는 겹치면 안 된다.
+     *
+     * 두 세션이 같은 열쇠를 들면 **저쪽에서는 한 세션이다** — 서로 다른
+     * 회의의 맥락이 조용히 한 자루에 섞이고, 화면에는 그 사실이 어디에도
+     * 안 나온다. 열쇠는 uid() 로 만들어 겹칠 일이 사실상 없지만, 사실상
+     * 없는 것과 있을 수 없는 것은 다르다.
+     */
+    uniqueAgentKey: uniqueIndex("sessions_agent_key_uq").on(t.agentKey),
+  }),
+);
+
+export type SessionRow = typeof sessions.$inferSelect;
 
 // ─────────────────────────────────────────────────────────────
 //   녹음
@@ -52,6 +141,25 @@ export const recordings = sqliteTable(
   {
     id: text("id").primaryKey(),
     title: text("title").notNull(),
+
+    /**
+     * 어느 세션에서 처리되나. 없으면 null.
+     *
+     * **null 이 정상적인 상태다.** 두 가지 경우가 있다.
+     *
+     * 1. 세션이 생기기 전에 올린 녹음. 마이그레이션이 일부러 null 로 둔다
+     *    (`drizzle/0001_sessions.sql` 의 설명).
+     * 2. 붙어 있던 세션이 지워진 녹음. 아래 `set null` 이 그 자리다.
+     *
+     * null 일 때는 예전 그대로 **녹음 하나가 곧 세션**이다 — 에이전트 열쇠가
+     * 녹음 id 가 된다 (`lib/session-server.ts` 의 `agentKeyFor`). 그러니
+     * 이 칸이 비어 있다고 못 쓰는 녹음이 아니다.
+     *
+     * `onDelete: "set null"` 인 이유: 세션을 지우는 것은 **맥락을 버리는
+     * 뜻**이지 전사문을 버리는 뜻이 아니다. cascade 로 두면 이름 하나를
+     * 지우려다 몇 시간짜리 전사문이 통째로 사라진다.
+     */
+    sessionId: text("session_id").references(() => sessions.id, { onDelete: "set null" }),
 
     /** MemoBento 파일 id. 파일을 못 올렸으면 null 이고, 그때는 전사도 못 한다. */
     fileId: text("file_id"),
@@ -112,6 +220,13 @@ export const recordings = sqliteTable(
     byCreated: index("recordings_created_idx").on(t.createdAt),
     /** 다시 떴을 때 도는 중이던 것을 찾는 길. */
     byState: index("recordings_state_idx").on(t.state),
+    /**
+     * 세션 하나에 붙은 녹음을 세고 모으는 길.
+     *
+     * 목록을 그릴 때마다 세션마다 개수를 세고, 다듬기를 줄 세울 때마다 같은
+     * 세션에서 도는 것이 있는지 본다. 둘 다 이 색인을 지난다.
+     */
+    bySession: index("recordings_session_idx").on(t.sessionId),
   }),
 );
 
@@ -161,6 +276,27 @@ export const segments = sqliteTable(
 
     /** 에이전트가 대사에서 추정한 화자. 화자 분리 모델은 쓰지 않는다. */
     speaker: text("speaker"),
+
+    /**
+     * 다듬기가 붙인 표시. 없으면 null.
+     *
+     * ## 왜 이 칸이 생겼나
+     *
+     * 이 전사 모델은 못 알아듣는 소리에 **빈 글이 아니라 그럴듯한 영어를
+     * 지어낸다** (실측: 한국어 오디오에 "Here's snucker, your foo's nick…").
+     * 그 사실을 모르는 에이전트는 그 헛소리를 매끄러운 문장으로 "다듬어"
+     * 버리고, 다듬고 나면 사람이 한 말인지 기계가 지어낸 것인지 가를 길이
+     * 사라진다.
+     *
+     * 모델의 제약을 알려 주면 다듬는 대신 **표시**하게 할 수 있다. 그 표시가
+     * 앉는 자리다. `raw` 는 그대로 남아 있으므로, 이 칸은 "왜 raw 그대로
+     * 두었는가" 에 대한 답이기도 하다.
+     *
+     * 열거값만 받는다 (`SEGMENT_FLAGS`). 자유 문장으로 열면 남이 만든
+     * 소리에서 나온 글이 화면에 앉는 자리가 하나 더 생기는데, 얻는 것이
+     * 없다 — 무슨 말이었는지는 이미 `text` 에 있다.
+     */
+    flag: text("flag", { enum: SEGMENT_FLAGS }),
 
     /**
      * 낱말별 시각. `[{ w, t }]` JSON.

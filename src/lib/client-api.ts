@@ -4,10 +4,13 @@ import type {
   ChatHistory,
   ChatStatus,
   PolishStart,
-  RecordingDTO,
   RecordingDetailResponse,
   RecordingListResponse,
+  RecordingWithSession,
   SegmentDTO,
+  SessionDTO,
+  SessionListResponse,
+  SessionPick,
   SummaryResponse,
 } from "./types";
 
@@ -20,8 +23,9 @@ import type {
  * 겪은 일이라 부르는 길을 하나로 좁혀 둔다.
  *
  * **몸통 모양은 여기서 정의하지 않는다.** 전부 `types.ts` 에서 가져온다.
- * 화면이 자기 몫의 타입을 따로 들면 서버가 칸 하나를 옮겨도 타입 검사가
- * 통과해 버린다 — 어긋난 것을 알아채는 자리가 런타임뿐이 된다.
+ * 세션도 표시(`flag`)도 모델 서술자도 마찬가지다 — 화면이 자기 몫의 타입을
+ * 따로 들면 서버가 칸 하나를 옮겨도 타입 검사가 통과해 버리고, 어긋난 것을
+ * 알아채는 자리가 런타임의 `undefined` 하나뿐이 된다.
  *
  * ## 계약에 없어서 **여기서 정한 것** (뼈대 담당이 보고 맞추거나 고쳐야 한다)
  *
@@ -32,10 +36,10 @@ import type {
  * 3단(init/chunk/finish)을 그대로 본떠 아래 네 주소를 가정했다
  * (부르는 곳은 `components/upload-queue.ts` 하나뿐이다):
  *
- *   POST   /api/upload/init   { name, size, title }  → { uploadId, chunkSize }
+ *   POST   /api/upload/init   { name, size, title, sessionId } → { uploadId, chunkSize }
  *   PUT    /api/upload/chunk?id=&index=   (octet-stream 본문)
- *   POST   /api/upload/finish { uploadId, title }    → { fileId } 또는 { recording }
- *   DELETE /api/upload/finish?id=                     (반쯤 올린 것 치우기)
+ *   POST   /api/upload/finish { uploadId, title, sessionId }   → { fileId } 또는 { recording }
+ *   DELETE /api/upload/finish?id=                               (반쯤 올린 것 치우기)
  *
  * 대화와 요약도 계약서에는 주소만 있고 **메서드와 조회 문자열이 없다.**
  * PaperBento 의 같은 자리(`/api/papers/[id]/chat`, `…/summarize`)와 같은
@@ -48,6 +52,21 @@ import type {
  *   GET    …/summary         → SummaryResponse
  *   POST   …/summary { instruction?, overwrite? } → SummaryResponse (run 이 돈다)
  *   GET    …/summary?id=<runId> → SummaryResponse
+ *
+ * 세션은 이번에 새로 생긴 것이라 계약서에 라우트가 아직 없다. 몸통 모양은
+ * `types.ts` 의 `SessionDTO`·`SessionPick`·`SessionListResponse` 를 그대로
+ * 쓰고, **주소만** 여기서 아래처럼 가정했다:
+ *
+ *   GET    /api/sessions                 → SessionListResponse
+ *   POST   /api/sessions { name }        → { session }
+ *   PATCH  /api/sessions/[id] { name }   → { session }
+ *   DELETE /api/sessions/[id]            → { deleted, recordingsKept }
+ *   POST   /api/sessions/[id]/rollover   → { session }
+ *   PATCH  /api/recordings/[id] { sessionId }  → { recording }
+ *
+ * `rollover` 를 하위 주소로 둔 것은 이 앱에 이미 같은 모양이 있어서다
+ * (`/api/recordings/[id]/retranscribe`). 둘 다 "이 물건에 이 동작을 시켜라"
+ * 이지 "이 칸을 이 값으로 고쳐라" 가 아니다.
  */
 
 async function get<T>(url: string, signal?: AbortSignal): Promise<T> {
@@ -73,22 +92,45 @@ const enc = encodeURIComponent;
 
 export const api = {
   // ── 녹음 ────────────────────────────────────────────────
-  /** 목록. 모델 안내(한국어 미지원)가 같은 봉투에 실려 온다. */
+  /** 목록. 모델 서술자와 세션 목록이 같은 봉투에 실려 온다. */
   list: (signal?: AbortSignal) => get<RecordingListResponse>("/api/recordings", signal),
 
-  /** 올린 파일로 녹음 한 건을 세운다. 서버가 곧바로 전사 줄에 넣는다. */
-  create: (fileId: string, title: string) =>
-    send<{ recording: RecordingDTO }>("/api/recordings", "POST", { fileId, title }).then(
-      (j) => j.recording,
-    ),
+  /**
+   * 올린 파일로 녹음 한 건을 세운다. 서버가 곧바로 전사 줄에 넣는다.
+   *
+   * `sessionId` 는 **올리기 전에 정해져 있다.** 파일을 고른 자리에서 어디로
+   * 보낼지 물어보고, 새 세션이면 그때 만들어 id 를 받아 온다. 나중에 붙이면
+   * 첫 다듬기가 이미 엉뚱한 세션에서 돌아 버린다.
+   */
+  create: (fileId: string, title: string, pick: SessionPick) =>
+    send<{ recording: RecordingWithSession }>("/api/recordings", "POST", {
+      fileId,
+      title,
+      ...pick,
+    }).then((j) => j.recording),
 
   detail: (id: string, signal?: AbortSignal) =>
     get<RecordingDetailResponse>(`/api/recordings/${enc(id)}`, signal),
 
   rename: (id: string, title: string) =>
-    send<{ recording: RecordingDTO }>(`/api/recordings/${enc(id)}`, "PATCH", { title }).then(
-      (j) => j.recording,
-    ),
+    send<{ recording: RecordingWithSession }>(`/api/recordings/${enc(id)}`, "PATCH", {
+      title,
+    }).then((j) => j.recording),
+
+  /**
+   * 이 녹음을 다른 세션으로 옮긴다. `null` 이면 세션에서 뺀다.
+   *
+   * 이름 고치기와 같은 라우트에 몸통으로 갈랐다 — 주소를 하나 더 파지 않는
+   * 것이 계약을 지키는 쪽이고, 둘 다 "녹음 한 건의 속성 고치기" 다.
+   *
+   * 이 길이 있어야 **잘못 고른 기본값을 되돌릴 수 있다.** 올릴 때 세션을
+   * 잘못 고르면 지난 회차의 맥락이 엉뚱한 회의에 섞이는데, 옮길 길이 없으면
+   * 그 녹음을 지우고 다시 올리는 수밖에 없다.
+   */
+  assign: (id: string, sessionId: string | null) =>
+    send<{ recording: RecordingWithSession }>(`/api/recordings/${enc(id)}`, "PATCH", {
+      sessionId,
+    }).then((j) => j.recording),
 
   remove: (id: string) => send<unknown>(`/api/recordings/${enc(id)}`, "DELETE"),
 
@@ -99,6 +141,43 @@ export const api = {
    * 물어보며 `state` 가 도는지 본다.
    */
   retranscribe: (id: string) => send<unknown>(`/api/recordings/${enc(id)}/retranscribe`, "POST"),
+
+  // ── 세션 ────────────────────────────────────────────────
+  sessions: {
+    list: (signal?: AbortSignal) =>
+      get<SessionListResponse>("/api/sessions", signal).then((j) => j.sessions ?? []),
+
+    create: (name: string) =>
+      send<{ session: SessionDTO }>("/api/sessions", "POST", { name }).then((j) => j.session),
+
+    rename: (id: string, name: string) =>
+      send<{ session: SessionDTO }>(`/api/sessions/${enc(id)}`, "PATCH", { name }).then(
+        (j) => j.session,
+      ),
+
+    /**
+     * 세션을 지운다. **붙어 있던 녹음의 전사문은 남는다.**
+     *
+     * 사라지는 것은 세션이 들고 있던 맥락(그동안의 대화)뿐이고, 녹음은
+     * `sessionId: null` 이 되어 "세션 없음" 으로 간다. 화면은 지우기 전에
+     * 그 사실을 글자로 말한다 — 안 그러면 아무도 이 단추를 못 누른다.
+     */
+    remove: (id: string) =>
+      send<{ deleted: boolean; recordingsKept: number }>(`/api/sessions/${enc(id)}`, "DELETE"),
+
+    /**
+     * 세션의 **에이전트 맥락만** 새로 시작한다.
+     *
+     * 맥락이 상한에 닿으면 서버가 다듬기·대화를 거절한다 — 잘라 보내면
+     * 에이전트가 못 본 대목을 "없다" 고 답하기 때문이다. 그때 사람이 고를 수
+     * 있는 두 갈래 중 하나가 이것이다: 이름과 붙어 있는 녹음은 그대로 두고
+     * 오간 대화만 버린다. **전사문은 손대지 않는다.**
+     */
+    rollover: (id: string) =>
+      send<{ session: SessionDTO }>(`/api/sessions/${enc(id)}/rollover`, "POST").then(
+        (j) => j.session,
+      ),
+  },
 
   // ── 조각(한 줄) ─────────────────────────────────────────
   patchSegment: (id: string, sid: string, patch: { text?: string; speaker?: string | null }) =>
@@ -113,7 +192,10 @@ export const api = {
    * 전사문 전체를 에이전트에게 넘겨 다듬는다. 화자도 여기서 추정된다.
    *
    * `context` 는 사람이 적어 주는 한 줄이다 — "무슨 회의인지" 를 알면
-   * 화자 추정과 용어 교정이 크게 달라진다.
+   * 화자 추정과 용어 교정이 크게 달라진다. **세션이 정해져 있으면 그
+   * 세션에서 돈다** — 어느 세션인지는 서버가 녹음에서 찾는다. 화면이
+   * 세션 id 를 다시 보내지 않는 것은, 보내는 순간 녹음이 붙어 있는 세션과
+   * 다른 값을 보낼 수 있게 되기 때문이다.
    */
   polish: (id: string, context?: string) =>
     send<PolishStart>(`/api/recordings/${enc(id)}/polish`, "POST", { context: context ?? "" }),

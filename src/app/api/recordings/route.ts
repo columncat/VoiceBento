@@ -3,16 +3,27 @@ import { z } from "zod";
 
 import { logAgent } from "@/lib/agent-log";
 import { MODEL_NOTICE } from "@/lib/model";
-import { createRecording, listRecordings, toRecordingDTO } from "@/lib/recording-server";
+import { createRecording, listRecordings, withSession } from "@/lib/recording-server";
+import {
+  MAX_SESSION_NAME,
+  SessionPickError,
+  listSessions,
+  resolveSessionPick,
+  sessionOfRecording,
+} from "@/lib/session-server";
 import { ensureStarted, enqueue, queueDepth } from "@/lib/transcribe";
 
 /**
  * 녹음 목록과 새로 세우기.
  *
- * 목록에 `model` 을 함께 싣는다. 계약에 없는 칸이지만 `RecordingDTO` 는
- * 손대지 않았다 — 봉투에 얹는 것이다. 이 모델이 **한국어를 못 한다**는 사실은
- * 녹음마다 다른 값이 아니라 앱 전체에 늘 참인 것이라, 목록을 여는 자리에서
- * 한 번 주는 편이 맞다 (`lib/model.ts` 의 설명).
+ * 목록에 `model` 과 `sessions` 를 함께 싣는다. 계약에 없는 칸이지만
+ * `RecordingDTO` 는 손대지 않았다 — 봉투에 얹는 것이다.
+ *
+ * - `model` — 이 모델이 무엇을 알아듣는가. 녹음마다 다른 값이 아니라 앱
+ *   전체에 늘 참인 사실이라 목록을 여는 자리에서 한 번 준다 (`lib/model.ts`).
+ * - `sessions` — 올릴 때 고를 자리. **올리기 전에** 있어야 한다. 파일을
+ *   고른 자리에서 어디로 보낼지 정해야 첫 다듬기가 제 세션에서 돈다.
+ *   나중에 옮기면 그 첫 다듬기는 이미 엉뚱한 자루에서 끝난 뒤다.
  */
 
 export const dynamic = "force-dynamic";
@@ -30,6 +41,7 @@ export async function GET() {
   return NextResponse.json({
     recordings: listRecordings(),
     model: MODEL_NOTICE,
+    sessions: listSessions(),
     queue: queueDepth(),
   });
 }
@@ -40,6 +52,14 @@ const createSchema = z.object({
   title: z.string().trim().max(500).optional(),
   /** 표시용 원본 이름. 없으면 제목을 쓴다. */
   sourceName: z.string().trim().max(400).optional(),
+
+  /**
+   * 어느 세션에서 처리할지. **둘 중 하나만.**
+   *
+   * 둘 다 없으면 세션 없이 둔다 — 그때는 예전처럼 녹음 하나가 곧 세션이다.
+   */
+  sessionId: z.string().trim().min(1).optional(),
+  newSessionName: z.string().trim().min(1).max(MAX_SESSION_NAME).optional(),
 });
 
 /**
@@ -54,16 +74,37 @@ export async function POST(req: Request) {
   if (!parsed.success) {
     return NextResponse.json({ error: "fileId 가 필요합니다" }, { status: 400 });
   }
-  const { fileId, title, sourceName } = parsed.data;
+  const { fileId, title, sourceName, sessionId, newSessionName } = parsed.data;
+
+  /*
+   * 세션을 **녹음을 세우기 전에** 정한다.
+   *
+   * 고른 세션이 없으면 여기서 400 이 나고 녹음은 안 생긴다. 반대로 했다면
+   * 녹음은 생기고 세션만 안 붙어, 사람은 이어 붙였다고 믿는데 실제로는
+   * 따로 노는 녹음이 하나 남는다.
+   */
+  let resolved: string | null;
+  try {
+    resolved = resolveSessionPick({ sessionId, newSessionName });
+  } catch (e) {
+    if (e instanceof SessionPickError) {
+      return NextResponse.json({ error: e.message }, { status: 400 });
+    }
+    throw e;
+  }
 
   const row = createRecording({
     title: title || sourceName || "제목 없음",
     fileId,
     sourceName: sourceName ?? title ?? "",
+    sessionId: resolved,
   });
 
-  logAgent(req, "녹음 세우기", row.title, { fileId });
+  logAgent(req, "녹음 세우기", row.title, { fileId, sessionId: resolved });
   enqueue(row.id);
 
-  return NextResponse.json({ recording: toRecordingDTO(row) }, { status: 201 });
+  return NextResponse.json(
+    { recording: withSession(row, sessionOfRecording(row)?.name ?? null) },
+    { status: 201 },
+  );
 }

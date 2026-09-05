@@ -97,11 +97,20 @@ function shortTool(name: string): string {
 export function VoiceChat({
   recordingId,
   recordingTitle,
+  sessionName,
   onSeek,
   className,
 }: {
   recordingId: string;
   recordingTitle: string;
+  /**
+   * 어느 세션에서 도는지. 안 붙어 있으면 null.
+   *
+   * 대화가 어느 세션에서 도는지는 **답이 달라지는 이유**다. 같은 세션이면
+   * 방금 돌린 다듬기와 지난 회차의 녹음을 이어받고, 아니면 이 녹음만 본다.
+   * 그 까닭이 화면 어디에도 없으면 앱이 변덕스러운 물건이 된다.
+   */
+  sessionName: string | null;
   /** 답에 나온 시각을 눌렀을 때. 재생기를 든 쪽이 넘겨준다. */
   onSeek: (t: number) => void;
   className?: string;
@@ -331,6 +340,14 @@ export function VoiceChat({
             {recordingTitle}
           </span>
         )}
+        {sessionName && (
+          <span
+            className="min-w-0 shrink truncate rounded-full bg-(--color-bg-2) px-2 py-0.5 text-[10.5px] text-(--color-fg-4)"
+            title={`세션 "${sessionName}" 에서 돕니다 — 같은 세션의 지난 녹음과 방금 다듬은 결과를 이어받습니다`}
+          >
+            {sessionName}
+          </span>
+        )}
       </div>
 
       <div className="flex shrink-0 items-center gap-1">
@@ -389,6 +406,13 @@ export function VoiceChat({
         >
           이 녹음의 전사문을 읽고 답합니다. 무슨 이야기였는지, 무엇이 정해졌는지, 어느 대목에
           그 말이 나오는지 물어보세요.
+          {sessionName && (
+            <>
+              {" "}
+              세션 <b className="font-medium text-(--color-fg-3)">{sessionName}</b> 에서 도는
+              대화라, 방금 다듬은 결과와 같은 세션의 지난 녹음도 이어받습니다.
+            </>
+          )}
         </p>
       )}
       {turns.map((t, i) => {

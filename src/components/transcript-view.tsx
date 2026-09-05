@@ -17,9 +17,10 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api, audioUrl } from "@/lib/client-api";
 import type {
   ModelNoticeDTO,
-  RecordingDTO,
   RecordingNoticeDTO,
+  RecordingWithSession,
   SegmentDTO,
+  SessionDTO,
 } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
@@ -27,7 +28,9 @@ import { AudioBar } from "./audio-bar";
 import { CrossAppLink } from "./cross-app-link";
 import { formatLength } from "./format";
 import { JobProgress, StateBadge, isBusy } from "./job-state";
+import { readModel } from "./model-capability";
 import { PolishPanel } from "./polish-panel";
+import { SessionBar } from "./session-bar";
 import { SplitPane } from "./split-pane";
 import { TranscriptBody } from "./transcript-body";
 import { VoiceChat } from "./voice-chat";
@@ -82,13 +85,16 @@ export function TranscriptView({
   memobentoUrl?: string | null;
   paperbentoUrl?: string | null;
 }) {
-  const [recording, setRecording] = useState<RecordingDTO | null>(null);
+  const [recording, setRecording] = useState<RecordingWithSession | null>(null);
   const [segments, setSegments] = useState<SegmentDTO[]>([]);
+  const [session, setSession] = useState<SessionDTO | null>(null);
   const [notice, setNotice] = useState<RecordingNoticeDTO | null>(null);
   const [polishError, setPolishError] = useState<string | null>(null);
   const [model, setModel] = useState<ModelNoticeDTO | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  /** 다듬기가 같은 세션의 다른 녹음 뒤에 줄을 섰다면 그 수. */
+  const [polishQueued, setPolishQueued] = useState<number | null>(null);
 
   const [collapsed, setCollapsed] = useState(false);
   const [following, setFollowing] = useState(true);
@@ -127,6 +133,7 @@ export function TranscriptView({
         const j = await api.detail(recordingId, signal);
         setRecording(j.recording);
         setSegments(j.segments ?? []);
+        setSession(j.session ?? null);
         setNotice(j.notice ?? null);
         setPolishError(j.polishError ?? null);
       } catch (e) {
@@ -146,10 +153,13 @@ export function TranscriptView({
   }, [load]);
 
   /*
-   * 모델 안내는 목록 응답에 실려 온다. 여기서도 한 번 받아 둔다 —
-   * 전사문이 비었을 때 "이 모델은 한국어를 못 합니다" 를 적어야 하는데,
-   * 그 말을 이 화면에 박아 두면 모델을 갈아 끼운 날 여기만 옛말이 남는다.
-   * 못 받으면 `language-notice.tsx` 의 기본값이 대신 나온다.
+   * 모델 서술자.
+   *
+   * 상세 응답에는 안 실려 오므로 목록에서 받아 온다. 이 화면이 서술자를
+   * **꼭** 알아야 하는 이유는 두 가지다: 전사문이 비었을 때 "이 모델이 모르는
+   * 말일 수 있다" 를 적어야 하고, `timestamps` 가 `"none"` 인 모델이면
+   * **낱말 클릭을 접어야** 한다. 둘 다 화면에 박아 두면 모델을 갈아 끼운 날
+   * 여기만 옛말이 남는다.
    */
   useEffect(() => {
     const ctl = new AbortController();
@@ -159,6 +169,16 @@ export function TranscriptView({
       .catch(() => undefined);
     return () => ctl.abort();
   }, []);
+
+  const cap = useMemo(() => readModel(model), [model]);
+
+  /**
+   * 어느 세션에서 도는지, 이름만.
+   *
+   * 온전한 서술(`session`)이 먼저이고, 없으면 녹음에 붙어 온 이름을 쓴다.
+   * 대화창과 다듬기 상자는 이름만 알면 되므로 여기서 하나로 좁힌다.
+   */
+  const sessionName = session?.name ?? recording?.sessionName ?? null;
 
   // 도는 동안에는 계속 물어본다. 끝나면 멈춘다.
   const busy = recording ? isBusy(recording.state) : false;
@@ -177,6 +197,12 @@ export function TranscriptView({
       document.removeEventListener("visibilitychange", tick);
     };
   }, [busy, load]);
+
+  // 다듬기가 끝나면 "줄 섰습니다" 안내를 걷는다. 남겨 두면 다 끝난 화면에
+  // 기다리라는 말이 붙어 있게 된다.
+  useEffect(() => {
+    if (recording && recording.state !== "polishing") setPolishQueued(null);
+  }, [recording]);
 
   const seek = useCallback((t: number) => {
     const el = audioRef.current;
@@ -215,7 +241,13 @@ export function TranscriptView({
 
   const onPolish = useCallback(
     async (context: string) => {
-      await api.polish(recordingId, context);
+      const started = await api.polish(recordingId, context);
+      /*
+       * 같은 세션에 다듬기가 겹치면 서버가 줄을 세운다 — 한 세션에
+       * `--resume` 이 둘 겹치면 대화가 서로를 덮어쓰기 때문이다. 그 사실이
+       * 화면에 안 보이면 "눌렀는데 아무 일도 안 난다" 가 되어 한 번 더 누른다.
+       */
+      setPolishQueued(started?.queued ? (started.aheadInSession ?? 0) : null);
       // 202 만 온다. 상태를 먼저 옮겨 두지 않으면 누른 자리가 그대로라
       // 한 번 더 누르게 된다. 진짜 상태는 곧 폴링이 가져온다.
       setRecording((r) => (r ? { ...r, state: "polishing", error: null } : r));
@@ -368,7 +400,7 @@ export function TranscriptView({
               </button>
             )}
 
-            <p className="flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-(--color-fg-4)">
+            <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-(--color-fg-4)">
               <span className="flex items-center gap-1">
                 <Clock className="h-3 w-3" />
                 {formatLength(recording.duration)}
@@ -376,7 +408,33 @@ export function TranscriptView({
               <span aria-hidden>·</span>
               <span>줄 {segments.length}</span>
               <StateBadge state={recording.state} className="ml-1" />
-            </p>
+              {/*
+                어느 세션에서 도는지. 제목 바로 아래에 두는 것은 오른쪽 날개에
+                무엇을 묻기 전에 **지금 누구와 이야기하는지**가 보여야 하기
+                때문이다 — 세션이 다르면 같은 질문에 다른 답이 온다.
+              */}
+              <SessionBar
+                session={session}
+                /*
+                  상세 응답이 세션을 안 실어 줘도 녹음에는 `sessionId`·
+                  `sessionName` 이 붙어 온다. 그것만으로도 "세션 없음" 이라는
+                  거짓말은 막을 수 있다 — 붙어 있는데 안 붙었다고 적으면
+                  사람이 같은 세션을 하나 더 만든다.
+                */
+                fallback={
+                  recording.sessionId
+                    ? { id: recording.sessionId, name: recording.sessionName ?? "이름 없는 세션" }
+                    : null
+                }
+                recordingId={recording.id}
+                onMoved={(next) => {
+                  setSession(next);
+                  setRecording((r) => (r ? { ...r, sessionId: next?.id ?? null } : r));
+                }}
+                onUpdated={setSession}
+                className="ml-1"
+              />
+            </div>
           </div>
         </div>
 
@@ -385,6 +443,7 @@ export function TranscriptView({
             recordingId={recording.id}
             segments={segments}
             state={recording.state}
+            sessionName={sessionName}
             onRun={onPolish}
           />
 
@@ -439,7 +498,7 @@ export function TranscriptView({
 
       {busy && (
         <section className="rounded-[var(--radius-app)] bg-(--color-surface) px-4 py-3 ring-1 ring-(--color-border-soft)">
-          <JobProgress recording={recording} />
+          <JobProgress recording={recording} rtf={cap.rtf} />
         </section>
       )}
 
@@ -450,16 +509,40 @@ export function TranscriptView({
         </p>
       )}
 
+      {polishQueued !== null && (
+        /*
+          같은 세션에 다듬기가 겹쳤다. 오류가 아니라 **차례**라서 경고색도
+          붉은색도 아니다. 한 세션에 `--resume` 이 둘 겹치면 대화가 서로를
+          덮어쓰기 때문에 서버가 줄을 세운다 — 그 규율이 이 앱을 조용히
+          망가뜨리지 않게 하는 것이라, 기다림을 감추지 않고 그대로 적는다.
+        */
+        <p className="flex items-start gap-2 rounded-[var(--radius-app)] bg-(--color-surface) px-4 py-2.5 text-[11.5px] leading-relaxed break-keep text-(--color-fg-3) ring-1 ring-(--color-border-soft)">
+          <Loader2 className="mt-0.5 h-3.5 w-3.5 shrink-0 animate-spin text-(--color-accent)" />
+          <span className="min-w-0">
+            같은 세션의 다른 녹음이 먼저 다듬는 중입니다. 앞에 {polishQueued}건이 있어 차례를
+            기다립니다 — 한 세션에서 둘이 동시에 돌면 대화가 서로를 덮어씁니다.
+          </span>
+        </p>
+      )}
+
       {polishError && (
         /*
           다듬기가 실패한 것은 **전사가 실패한 것과 다른 일이다.** 전사문은
           멀쩡히 있고 화자만 안 붙은 상태라, 위의 붉은 띠와 같은 무게로
           말하면 사람이 전사까지 날아간 줄 안다.
+
+          **문장을 여기서 짓지 않는다.** 이 칸(`polishError`)에는 두 가지가
+          온다 — 진짜 실패("에이전트에 닿지 못했습니다")와, 성공했지만 알려야
+          할 것("표시된 줄 3개: …"). 앞에 "다듬기가 끝나지 못했습니다" 를
+          붙이면 뒤엣것이 실패로 둔갑한다. 표시를 붙이는 것은 이 기능이
+          제대로 돈 결과인데 화면이 그것을 고장이라고 말하는 셈이다.
+          서버가 보낸 문장은 둘 다 그 자체로 완결되어 있으니 그대로 싣고,
+          우리는 둘 다에 참인 말만 덧붙인다.
         */
         <p className="flex items-start gap-2 rounded-[var(--radius-app)] bg-(--color-warn)/10 px-4 py-2.5 text-[11.5px] leading-relaxed break-keep text-(--color-warn) ring-1 ring-(--color-warn)/25">
           <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
           <span className="min-w-0">
-            다듬기가 끝나지 못했습니다: {polishError} — 옮긴 글은 그대로 있습니다. 다시 눌러 보세요.
+            {polishError} 옮긴 글은 그대로 있습니다. 뜻대로 되지 않았다면 다시 눌러 보세요.
           </span>
         </p>
       )}
@@ -507,7 +590,7 @@ export function TranscriptView({
             onActiveChange={onActiveChange}
             jumpRef={jumpRef}
             notice={notice}
-            model={model}
+            cap={cap}
             showEmptyNotice={emptyish}
             onSave={onSaveSegment}
             className="h-full"
@@ -518,6 +601,7 @@ export function TranscriptView({
             <VoiceChat
               recordingId={recording.id}
               recordingTitle={recording.title}
+              sessionName={sessionName}
               onSeek={seek}
             />
             <VoiceSummary recordingId={recording.id} state={recording.state} />

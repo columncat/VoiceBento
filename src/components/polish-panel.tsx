@@ -1,6 +1,6 @@
 "use client";
 
-import { AlertTriangle, Loader2, Users, WandSparkles, X } from "lucide-react";
+import { AlertTriangle, Layers, Loader2, Users, WandSparkles, X } from "lucide-react";
 import { useMemo, useState } from "react";
 
 import type { JobState, SegmentDTO } from "@/lib/types";
@@ -29,6 +29,16 @@ import { formatBytes } from "./format";
  *
  * 크기는 **여기서 미리 재서 보여 준다.** 서버도 같은 것을 봐야 하지만,
  * 눌러 보고 나서 "안 됩니다" 를 듣는 것보다 누르기 전에 아는 편이 낫다.
+ *
+ * ## 세션 하나에서 돈다
+ *
+ * 다듬기·대화·요약이 **같은 세션**을 쓴다. 전에는 다듬기가 일회용이라 방금
+ * 다듬은 것을 대화창이 몰랐다 — 화자를 누구로 봤는지, 왜 그렇게 봤는지가
+ * 다듬기가 끝나는 순간 사라졌다. 같은 세션에서 돌면 대화가 그것을 이어받는다.
+ *
+ * 그 대신 **한 세션에서 둘이 동시에 돌 수 없다.** 같은 세션에 `--resume` 이
+ * 겹치면 대화가 서로를 덮어쓴다. 서버가 줄을 세우고, 화면은 기다린다는 것을
+ * 그대로 적는다 (`queuedBehind`).
  *
  * ## 사람이 고친 줄은 안 덮는다
  *
@@ -70,12 +80,15 @@ export function PolishPanel({
   recordingId,
   segments,
   state,
+  sessionName,
   onRun,
   className,
 }: {
   recordingId: string;
   segments: SegmentDTO[];
   state: JobState;
+  /** 어느 세션에서 도는지. 안 붙어 있으면 null. */
+  sessionName: string | null;
   /** 시작시키기. 진행은 녹음의 `state` 가 `polishing` 으로 바뀌며 보인다. */
   onRun: (context: string) => Promise<void>;
   className?: string;
@@ -159,6 +172,29 @@ export function PolishPanel({
               </button>
             </header>
 
+            {/*
+              어느 세션에서 도는지 먼저 말한다. 맥락을 적기 전에 알아야 할
+              것이다 — 세션이 이미 지난 회차의 화자 이름을 들고 있으면 여기에
+              같은 것을 또 적을 필요가 없다.
+            */}
+            <p className="mb-2 flex items-start gap-1.5 rounded-md bg-(--color-bg-2) px-2.5 py-1.5 text-[11px] leading-relaxed break-keep text-(--color-fg-3) ring-1 ring-(--color-border-soft)">
+              <Layers className="mt-0.5 h-3 w-3 shrink-0 text-(--color-accent-strong)" />
+              <span className="min-w-0">
+                {sessionName ? (
+                  <>
+                    세션 <b className="font-medium text-(--color-fg-2)">{sessionName}</b> 에서
+                    돕니다. 이 세션의 지난 녹음에서 쓰던 화자 이름과 용어를 이어받고, 다듬은
+                    결과는 오른쪽 대화창이 그대로 이어받습니다.
+                  </>
+                ) : (
+                  <>
+                    이 녹음은 어느 세션에도 붙어 있지 않습니다. 이어받을 지난 회차가 없고, 다듬은
+                    결과도 이 녹음 안에서만 남습니다.
+                  </>
+                )}
+              </span>
+            </p>
+
             <p className="mb-2 text-[11px] leading-relaxed break-keep text-(--color-fg-4)">
               {/*
                 맥락 한 줄이 결과를 크게 바꾼다. 사람 수와 이름을 알면 화자
@@ -226,6 +262,7 @@ export function PolishPanel({
             <div className="mt-3 flex items-center justify-end gap-2">
               <span className="mr-auto text-[10.5px] break-keep text-(--color-fg-4)">
                 다시 돌려도 직접 고친 줄은 안 덮습니다
+                {sessionName && " · 같은 세션의 다른 녹음이 돌고 있으면 차례를 기다립니다"}
               </span>
               <button
                 type="button"

@@ -42,20 +42,48 @@
  *   {"type":"done","segments":123,"empty":3,"speech":2841.2}
  *   {"type":"error","message":"…"}
  *
+ * ## 모델의 성질은 **인자로 온다**
+ *
+ * 파일 이름도, 표본율도, VAD 상한도 여기 박혀 있지 않다. 부모가 서술자에서
+ * 골라 `--spec` 에 JSON 으로 실어 준다 (`src/lib/asr-models.ts`).
+ *
+ * 워커가 제 손으로 서술자 표를 읽게 하지 않는 이유: 환경변수가 어긋난 날
+ * (부모는 새 모델, 워커는 기본값) 둘이 다른 모델로 도는데 그 어긋남이 아무
+ * 데도 안 보인다. 나오는 것은 그냥 이상한 전사문이다. 부모가 고르고 워커가
+ * 따르면 그런 갈림길이 없다.
+ *
+ * 손으로 돌려 볼 때를 위해 `--model <id>` 도 받는다. 그때만 옆의
+ * `asr-models.json` 을 읽는다.
+ *
+ * ## 결과 모양 어댑터
+ *
+ * 모델마다 sherpa 에 주는 설정과 돌려주는 것이 다르다.
+ *
+ * - `transducer` (parakeet) — encoder/decoder/joiner. `tokens` 와
+ *   `timestamps` 를 주므로 낱말로 묶을 수 있다.
+ * - `whisper` — encoder/decoder 만. **시각을 하나도 안 준다**
+ *   (`result.timestamps` 가 빈 배열이다 — 실측). 그때는 낱말 시각 없이
+ *   조각의 시작·끝만 내보내고, 화면이 낱말 클릭을 접는다.
+ *
+ * 아래 `RECOGNIZERS` 가 그 갈림길이고, 모델을 하나 더 붙일 때 손대는 곳은
+ * 서술자 한 칸과 (파일 구성이 다르면) 여기 한 칸이 전부다.
+ *
  * 실행:
  *   node scripts/transcribe.mjs --input <원본> --wav <내보낼 WAV> \
- *        --model-dir <모델 폴더> [--vad <silero_vad.onnx>] \
- *        [--threads 4] [--ffmpeg ffmpeg]
+ *        --model-dir <모델 폴더> --spec '<서술자 JSON>' \
+ *        [--vad <silero_vad.onnx>] [--threads 4] [--ffmpeg ffmpeg]
+ *
+ *   손으로 돌릴 때: --spec 대신 --model parakeet-tdt-0.6b-v3-int8
  *
  * `--vad` 를 안 주면 모델 폴더 안에서 찾는다. 스택 배포는 VAD 가 모델 폴더
  * 밖에 있어서 그 자리를 따로 넘긴다 (`src/lib/env.ts` 의 `modelPaths`).
  */
 
 import { spawn } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { join } from "node:path";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 const require = createRequire(import.meta.url);
 
@@ -111,6 +139,78 @@ function parseArgs(argv) {
  * 인자 검사와 `process.exit` 가 있으면 import 하는 순간 그것들이 먼저 돌아
  * "인자가 없다" 로 죽는다 — 실제로 그랬다. 아래 `isMain` 갈림길이 그 길을 막는다.
  */
+/**
+ * 서술자를 손에 쥔다. `--spec` 이 먼저고, 없으면 `--model` 로 표에서 찾는다.
+ *
+ * **아는 모양만 받는다.** 부모가 보낸 것이라 믿어도 될 것 같지만, 여기서
+ * 안 보면 잘못된 값이 sherpa 까지 내려가고 거기서 나는 오류는 C++ 예외라
+ * 프로세스를 통째로 죽인다 (그게 이 워커가 자식 프로세스인 이유다).
+ * 여기서 걸러 내면 사람이 읽을 수 있는 문장 하나로 끝난다.
+ */
+function readSpec(args) {
+  let spec;
+  if (args.spec) {
+    try {
+      spec = JSON.parse(args.spec);
+    } catch (e) {
+      fail(`--spec 이 JSON 이 아닙니다: ${e.message}`);
+    }
+  } else if (args.model) {
+    // 손으로 돌릴 때만 지나는 길. 평소에는 부모가 --spec 을 준다.
+    const table = JSON.parse(
+      readFileSync(join(fileURLToPath(new URL(".", import.meta.url)), "asr-models.json"), "utf8"),
+    );
+    const found = table.models?.[args.model];
+    if (!found) {
+      fail(
+        `모르는 모델 id 입니다: ${args.model}. ` +
+          `아는 것: ${Object.keys(table.models ?? {}).join(", ")}`,
+      );
+    }
+    spec = found.runtime;
+  } else {
+    fail("--spec (또는 손으로 돌릴 때 --model) 이 필요합니다");
+  }
+
+  const kind = spec?.kind;
+  if (!RECOGNIZERS[kind]) {
+    fail(
+      `서술자의 kind 를 모릅니다: ${JSON.stringify(kind)}. ` +
+        `아는 것: ${Object.keys(RECOGNIZERS).join(", ")}. ` +
+        `새 모델을 붙이려면 이 파일의 RECOGNIZERS 에 어댑터를 하나 더해야 합니다.`,
+    );
+  }
+  const f = spec.files ?? {};
+  if (!f.encoder || !f.decoder || !f.tokens) {
+    fail("서술자에 encoder·decoder·tokens 파일 이름이 있어야 합니다");
+  }
+  if (spec.sampleRate !== 16000) {
+    // silero VAD 가 다른 표본율을 아예 거절한다. 그 거절은 C++ 에서 나온다.
+    fail(`서술자의 sampleRate 가 ${spec.sampleRate} 입니다. silero VAD 는 16000 만 받습니다.`);
+  }
+  const vad = spec.vad ?? {};
+  if (!(vad.maxSpeechDuration > 0) || !(vad.windowSize > 0)) {
+    fail("서술자에 VAD 설정(maxSpeechDuration·windowSize)이 있어야 합니다");
+  }
+  /*
+   * **이 검사가 이 파일에서 가장 중요한 검사다.**
+   *
+   * 모델 상한을 넘는 조각이 들어가면 죽는다 (parakeet 은 400초에서
+   * 위치 임베딩이 터진다). VAD 상한을 그보다 작게 걸어 두면 그런 조각이
+   * **만들어질 수 없다** — "조심해서 자르자" 가 아니라 구조적으로 불가능하게
+   * 만드는 것이 요점이다. 서술자 쪽에도 같은 불변식이 있지만
+   * (`asr-models.ts` 의 `assertModel`), 손으로 --spec 을 만들어 넣는 길이
+   * 있는 한 여기서도 봐야 한다.
+   */
+  if (spec.maxAudioSeconds != null && vad.maxSpeechDuration >= spec.maxAudioSeconds) {
+    fail(
+      `VAD 조각 상한(${vad.maxSpeechDuration}초)이 모델 상한(${spec.maxAudioSeconds}초)보다 ` +
+        `작지 않습니다. 이대로면 모델을 넘어뜨리는 조각이 만들어질 수 있습니다.`,
+    );
+  }
+  return spec;
+}
+
 function readArgs() {
   const args = parseArgs(process.argv.slice(2));
   const input = args.input;
@@ -119,16 +219,28 @@ function readArgs() {
   if (!input || !wav || !modelDir) {
     fail("--input, --wav, --model-dir 이 모두 필요합니다");
   }
+  const spec = readSpec(args);
+
+  /*
+   * 파일 **이름**은 서술자가 정하고 **자리**는 인자가 정한다.
+   *
+   * 갈라 둔 이유: 배포 모양에 따라 폴더가 다르지만(우리가 받은 자리 ·
+   * 스택이 읽기 전용으로 물려 준 자리) 그 안의 파일 이름은 모델이 정한다.
+   */
+  const files = { tokens: join(modelDir, spec.files.tokens) };
+  for (const key of ["encoder", "decoder", "joiner"]) {
+    if (spec.files[key]) files[key] = join(modelDir, spec.files[key]);
+  }
+
   return {
     input,
     wav,
-    threads: Number(args.threads ?? 4) || 4,
+    spec,
+    // 스레드도 서술자에 기본값이 있다. 인자가 오면 그쪽이 이긴다.
+    threads: Number(args.threads ?? spec.defaultThreads ?? 4) || 4,
     ffmpeg: args.ffmpeg || "ffmpeg",
     model: {
-      encoder: join(modelDir, "encoder.int8.onnx"),
-      decoder: join(modelDir, "decoder.int8.onnx"),
-      joiner: join(modelDir, "joiner.int8.onnx"),
-      tokens: join(modelDir, "tokens.txt"),
+      ...files,
       /*
        * VAD 는 **인자로 받는다.** 모델 폴더 안에 있다고 짐작하지 않는다.
        *
@@ -219,6 +331,23 @@ function extractAudio(cfg) {
  * 이어 붙인다. 낱말의 시각은 첫 토큰의 시각이다 — 낱말을 눌러 그 자리로
  * 뛰는 데 쓰는 값이고, 실측 오차가 ±0.3초 안쪽이라 충분하다.
  */
+/**
+ * 조각 하나의 결과에서 낱말과 시각을 뽑는다. **모델마다 갈린다.**
+ *
+ * `timestamps: "none"` 인 모델(sherpa-onnx 의 whisper)은 시각을 하나도 안
+ * 준다. 그때 억지로 뽑으려 하면 안 된다 — `result.timestamps` 가 빈 배열이라
+ * `groupWords` 가 모든 낱말에 0초를 붙이고, 화면에서 낱말을 누르면 **전부
+ * 녹음 맨 앞으로 뛴다.** 아무 데도 안 뛰는 것보다 나쁘다. 거짓말이니까.
+ *
+ * 그래서 빈 배열을 낸다. 화면은 `ModelNoticeDTO.timestamps` 를 보고 낱말
+ * 클릭을 통째로 접고, 줄 클릭(조각의 시작 시각)만 남긴다. 그건 조각 경계에서
+ * 나온 값이라 이 모델에서도 정확하다.
+ */
+function extractWords(spec, result) {
+  if (spec.timestamps === "none") return [];
+  return groupWords(result.tokens ?? [], result.timestamps ?? []);
+}
+
 export function groupWords(tokens, timestamps) {
   const words = [];
   for (let i = 0; i < tokens.length; i++) {
@@ -237,12 +366,55 @@ export function groupWords(tokens, timestamps) {
 }
 
 // ─────────────────────────────────────────────────────────────
+//   결과 모양 어댑터 — 모델 갈래마다 하나
+// ─────────────────────────────────────────────────────────────
+
+/**
+ * sherpa 에 줄 `modelConfig` 를 만든다. **모델을 하나 더 붙일 때 여기 한 칸.**
+ *
+ * 갈래마다 파일 구성과 칸 이름이 다르다. 서술자가 아무리 잘 적혀 있어도
+ * 이 모양은 sherpa 쪽 계약이라 코드로 알아야 한다 — 그래서 서술자에 안 담고
+ * 여기 둔다. 서술자 = 사실, 여기 = 그 사실을 저쪽 모양으로 옮기는 법.
+ */
+const RECOGNIZERS = {
+  transducer: (model, spec) => ({
+    transducer: { encoder: model.encoder, decoder: model.decoder, joiner: model.joiner },
+    tokens: model.tokens,
+    /*
+     * 문서가 시키는 값이다 (`--model-type=nemo_transducer`).
+     * 비워 두면 sherpa 가 encoder 의 ONNX 메타데이터를 읽어 알아내지만,
+     * 내보내기 판본에 따라 그 칸이 비어 있는 것이 있다. 명시하면 그 갈림길이
+     * 사라진다.
+     */
+    modelType: spec.modelType || "nemo_transducer",
+  }),
+
+  /**
+   * whisper — **아직 아무도 안 쓴다.** 붙이는 자리가 실제로 열려 있는지
+   * 확인하려고 적어 둔 갈래다.
+   *
+   * 두 가지가 transducer 와 다르다.
+   * 1. joiner 가 없다. encoder/decoder 둘뿐이다.
+   * 2. **시각을 안 준다.** 그 갈림길은 `extractWords` 에 있다.
+   *
+   * `language: ""` 는 whisper 가 스스로 알아맞히게 두는 값이다. 특정 언어로
+   * 못 박으면 그 말이 아닌 자리에서 조용히 엉뚱한 글이 나온다.
+   */
+  whisper: (model, spec) => ({
+    whisper: { encoder: model.encoder, decoder: model.decoder, language: "", task: "transcribe" },
+    tokens: model.tokens,
+    modelType: spec.modelType || "whisper",
+  }),
+};
+
+// ─────────────────────────────────────────────────────────────
 //   2단계 — VAD 로 자르고 조각마다 디코딩
 // ─────────────────────────────────────────────────────────────
 
 async function main() {
   const cfg = readArgs();
   const MODEL = cfg.model;
+  const SPEC = cfg.spec;
   const THREADS = cfg.threads;
 
   for (const [name, path] of Object.entries(MODEL)) {
@@ -283,17 +455,17 @@ async function main() {
 
   const sampleRate = wave.sampleRate;
   /*
-   * 16kHz 가 아니면 여기서 멈춘다.
+   * 서술자가 말하는 표본율이 아니면 여기서 멈춘다 (지금은 늘 16000이다).
    *
    * silero VAD 는 다른 표본율을 아예 거절한다 (`Expected sample rate 16000.
    * Given: 24000`). 그 거절은 C++ 에서 나오므로 잡을 수 없고, 잡히더라도
    * 그 문장만으로는 사람이 무엇을 잘못했는지 모른다. 앞 단계에서 ffmpeg 이
    * 늘 16k 로 맞추므로 여기 걸리면 그건 우리 쪽 실수라는 뜻이다.
    */
-  if (sampleRate !== 16000) {
+  if (sampleRate !== SPEC.sampleRate) {
     fail(
-      `정규화한 WAV 가 ${sampleRate}Hz 입니다. 16000Hz 여야 합니다 — ` +
-        `ffmpeg 인자(-ar 16000)가 빠졌거나 다른 파일을 읽었습니다.`,
+      `정규화한 WAV 가 ${sampleRate}Hz 입니다. ${SPEC.sampleRate}Hz 여야 합니다 — ` +
+        `ffmpeg 인자(-ar ${SPEC.sampleRate})가 빠졌거나 다른 파일을 읽었습니다.`,
     );
   }
   const total = wave.samples.length / sampleRate;
@@ -301,53 +473,51 @@ async function main() {
   log(`오디오 ${total.toFixed(1)}초 @ ${sampleRate}Hz`);
 
   const recognizer = new sherpa.OfflineRecognizer({
-    featConfig: { sampleRate, featureDim: 80 },
+    featConfig: { sampleRate, featureDim: SPEC.featureDim },
     modelConfig: {
-      transducer: {
-        encoder: MODEL.encoder,
-        decoder: MODEL.decoder,
-        joiner: MODEL.joiner,
-      },
-      tokens: MODEL.tokens,
-      /*
-       * 문서가 시키는 값이다 (`--model-type=nemo_transducer`).
-       * 비워 두면 sherpa 가 encoder 의 ONNX 메타데이터를 읽어 알아내지만,
-       * 내보내기 판본에 따라 그 칸이 비어 있는 것이 있다. 명시하면 그 갈림길이
-       * 사라진다.
-       */
-      modelType: "nemo_transducer",
+      ...RECOGNIZERS[SPEC.kind](MODEL, SPEC),
       numThreads: THREADS,
       provider: "cpu",
       debug: 0,
     },
   });
-  log(`모델 적재 ${((Date.now() - t0) / 1000).toFixed(2)}s (threads=${THREADS})`);
+  log(
+    `모델 적재 ${((Date.now() - t0) / 1000).toFixed(2)}s ` +
+      `(${SPEC.id ?? SPEC.kind}, threads=${THREADS}, timestamps=${SPEC.timestamps})`,
+  );
 
-  const windowSize = 512;
+  const windowSize = SPEC.vad.windowSize;
   const vad = new sherpa.Vad(
     {
       sileroVad: {
         model: MODEL.vad,
-        threshold: 0.5,
-        minSilenceDuration: 0.5,
-        minSpeechDuration: 0.25,
+        threshold: SPEC.vad.threshold,
+        minSilenceDuration: SPEC.vad.minSilenceDuration,
+        minSpeechDuration: SPEC.vad.minSpeechDuration,
         /*
          * **이 값이 이 파일에서 가장 중요한 숫자다.**
          *
-         * 400초(5,000프레임)를 넘는 조각이 모델에 들어가면 죽는다. 30초를
-         * 상한으로 걸어 두면 그런 조각이 만들어질 수 없다 — 말이 30초 넘게
-         * 이어져도 VAD 가 거기서 끊어 준다. "조심해서 자르자" 가 아니라
-         * 구조적으로 불가능하게 만드는 것이 요점이다.
+         * 모델 상한(parakeet 은 400초 = 5,000프레임)을 넘는 조각이 들어가면
+         * 죽는다. 그보다 작은 상한을 걸어 두면 그런 조각이 **만들어질 수
+         * 없다** — 말이 그보다 길게 이어져도 VAD 가 거기서 끊어 준다.
+         * "조심해서 자르자" 가 아니라 구조적으로 불가능하게 만드는 것이 요점이다.
+         *
+         * 이제 값은 서술자에서 온다 (parakeet 은 30). 모델마다 다른 값이고,
+         * 모델 상한보다 작아야 한다는 것은 `readSpec` 이 이미 확인했다.
          */
-        maxSpeechDuration: 30,
+        maxSpeechDuration: SPEC.vad.maxSpeechDuration,
         windowSize,
       },
       sampleRate,
       numThreads: 1,
       debug: false,
     },
-    // 내부 원형 버퍼(초). 상한 30초짜리 조각이 여유롭게 들어갈 크기.
-    60,
+    /*
+     * 내부 원형 버퍼(초). 조각 하나가 여유롭게 들어갈 크기여야 한다 —
+     * 작으면 긴 조각이 잘리고, 그 잘림은 아무 오류 없이 조용히 일어난다.
+     * 상한의 두 배로 잡되 최소 60초.
+     */
+    Math.max(60, SPEC.vad.maxSpeechDuration * 2),
   );
 
   emit({ type: "stage", stage: "transcribing" });
@@ -382,8 +552,13 @@ async function main() {
     speech += dur;
     chars += text.length;
 
-    // 조각 안의 시각은 조각 기준이다. 전체 기준으로 옮겨 앉힌다.
-    const words = groupWords(result.tokens ?? [], result.timestamps ?? []).map((w) => ({
+    /*
+     * 조각 안의 시각은 조각 기준이다. 전체 기준으로 옮겨 앉힌다.
+     *
+     * 시각을 안 주는 모델이면 여기서 빈 배열이 온다 (`extractWords`).
+     * 억지로 채우지 않는다 — 전부 0초가 붙은 낱말은 없는 것보다 나쁘다.
+     */
+    const words = extractWords(SPEC, result).map((w) => ({
       w: w.w,
       t: Number((start + w.t).toFixed(3)),
     }));

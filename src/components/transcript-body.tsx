@@ -1,12 +1,14 @@
 "use client";
 
-import { Crosshair } from "lucide-react";
+import { Crosshair, TriangleAlert } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState, type RefObject } from "react";
 
-import type { ModelNoticeDTO, RecordingNoticeDTO, SegmentDTO } from "@/lib/types";
+import type { RecordingNoticeDTO, SegmentDTO } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
-import { EmptyTranscriptNotice } from "./language-notice";
+import { EmptyTranscriptNotice, TimestampCapabilityLine } from "./language-notice";
+import type { ModelCapability } from "./model-capability";
+import { isFlagged } from "./segment-flag";
 import { SegmentRow } from "./segment-row";
 import { SpeakerLegend, useSpeakerStyles } from "./speaker";
 
@@ -55,7 +57,7 @@ export function TranscriptBody({
   onActiveChange,
   jumpRef,
   notice,
-  model,
+  cap,
   showEmptyNotice,
   onSave,
   className,
@@ -69,7 +71,8 @@ export function TranscriptBody({
   /** 위쪽 재생기의 "재생 중인 줄로" 가 부를 함수를 여기 꽂아 둔다. */
   jumpRef: RefObject<(() => void) | null>;
   notice: RecordingNoticeDTO | null;
-  model: ModelNoticeDTO | null;
+  /** 모델이 무엇을 할 수 있나. 낱말 클릭 여부가 여기서 갈린다. */
+  cap: ModelCapability;
   /** 전사가 끝났는데 옮겨진 말이 거의 없는가. */
   showEmptyNotice: boolean;
   onSave: (id: string, patch: { text?: string; speaker?: string | null }) => Promise<void>;
@@ -115,6 +118,27 @@ export function TranscriptBody({
     },
     [starts, segments],
   );
+
+  /**
+   * 에이전트가 표시한 줄이 몇 개인가.
+   *
+   * 200줄짜리 전사문에서 표시된 줄 셋은 굴려 내려가다 지나치기 쉽다. 위에
+   * 개수를 적고 **첫 줄로 데려다주는 단추**를 붙인다 — 표시는 "여기를 보라"
+   * 는 말인데, 찾는 데 품이 들면 아무도 안 본다.
+   */
+  const flagged = useMemo(() => segments.filter(isFlagged).length, [segments]);
+
+  /** 표시된 첫 줄로 굴린다. `data-flagged` 는 줄 상자가 심어 둔다. */
+  const jumpToFlagged = useCallback(() => {
+    const box = boxRef.current;
+    const row = box?.querySelector<HTMLElement>("[data-flagged]");
+    if (!box || !row) return;
+    // 줄 상자는 `SegmentRow` 안쪽이라 `offsetTop` 기준이 다를 수 있다.
+    // 바깥 감싼 칸(`offsetParent` 가 상자인 쪽)까지 거슬러 올라가 잰다.
+    const top = (row.offsetParent === box ? row : (row.offsetParent as HTMLElement | null) ?? row)
+      .offsetTop;
+    box.scrollTo({ top: Math.max(0, top - box.clientHeight * FOLLOW_ANCHOR), behavior: "smooth" });
+  }, []);
 
   /** 지금 재생 중인 줄을 상자 안으로 불러온다. */
   const jumpToActive = useCallback(() => {
@@ -242,7 +266,7 @@ export function TranscriptBody({
   if (showEmptyNotice) {
     return (
       <div className={cn("flex flex-col gap-3", className)}>
-        <EmptyTranscriptNotice notice={notice} model={model} />
+        <EmptyTranscriptNotice notice={notice} cap={cap} />
         {/* 조각이 있긴 하면(빈 글이라도) 아래에 그대로 보여 준다. 시각은 맞으니까. */}
         {segments.length > 0 && (
           <p className="px-1 text-[11px] text-(--color-fg-4)">
@@ -260,6 +284,34 @@ export function TranscriptBody({
           styles={speakers}
           className="shrink-0 rounded-lg bg-(--color-bg-2) px-3 py-2 ring-1 ring-(--color-border-soft)"
         />
+      )}
+
+      {/* 시각을 낱말 단위로 못 주는 모델이면 그 사실을 여기서 말한다. */}
+      <TimestampCapabilityLine cap={cap} className="shrink-0" />
+
+      {flagged > 0 && (
+        /*
+          에이전트가 다듬지 않고 표시만 한 줄이 있다.
+
+          **이것은 오류가 아니다.** 이 모델은 못 알아듣는 소리에 빈 글 대신
+          그럴듯한 말을 지어내는데, 에이전트가 그것을 알아보고 손대지 않은
+          것이다. 그러니 붉은 띠가 아니라 경고색이고, 문장도 "무엇이 잘못됐다"
+          가 아니라 "여기를 사람이 봐 달라" 로 적는다.
+        */
+        <div className="flex shrink-0 flex-wrap items-center gap-x-2 gap-y-1 rounded-lg bg-(--color-warn)/10 px-3 py-1.5 text-[11px] break-keep text-(--color-warn) ring-1 ring-(--color-warn)/25">
+          <TriangleAlert className="h-3.5 w-3.5 shrink-0" />
+          <span className="min-w-0">
+            에이전트가 표시한 줄 {flagged}개 — 알아듣지 못했을 수 있어 다듬지 않고 그대로
+            두었습니다. 소리를 들어 보고 고쳐 주세요.
+          </span>
+          <button
+            type="button"
+            onClick={jumpToFlagged}
+            className="ml-auto shrink-0 rounded-full bg-(--color-warn)/15 px-2.5 py-0.5 text-[10.5px] transition hover:bg-(--color-warn)/25"
+          >
+            첫 줄로
+          </button>
+        </div>
       )}
 
       {/*
@@ -299,6 +351,7 @@ export function TranscriptBody({
                   active={i === activeIndex}
                   time={i === activeIndex ? time : null}
                   speakerListId={speakerListId}
+                  wordClick={cap.wordClick}
                   onSeek={onSeek}
                   onSave={onSave}
                 />

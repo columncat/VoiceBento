@@ -148,6 +148,17 @@ function Row({ item }: { item: UploadItem }) {
         <div className="truncate text-[11.5px] text-(--color-fg-2)" title={item.name}>
           {item.name}
         </div>
+        {item.sessionName && (
+          /*
+            어느 세션으로 가는지 여기서도 보인다. 세션은 올리기 전에 한 번만
+            묻는데, 여러 개를 놓고 다른 것을 하다 돌아오면 무엇을 골랐는지
+            기억이 안 난다. 지금 되돌릴 수는 없지만(전송이 이미 돈다), 다
+            올라간 뒤 카드에서 옮길지 말지를 여기서 판단할 수 있다.
+          */
+          <div className="truncate text-[10px] text-(--color-fg-4)" title={item.sessionName}>
+            세션 · {item.sessionName}
+          </div>
+        )}
         {busy && (
           <div className="mt-1 h-1 w-full overflow-hidden rounded-full bg-(--color-bg-2)">
             <div

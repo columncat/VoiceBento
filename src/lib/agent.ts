@@ -1,7 +1,16 @@
 import { and, eq } from "drizzle-orm";
 
+import { inLane, laneBusy, laneDepth } from "./agent-queue";
+import {
+  AGENT_CONTEXT_LIMIT,
+  agentReadingCaveat,
+  isSegmentFlag,
+  modelBrief,
+  type AgentModelBrief,
+  type SegmentFlag,
+} from "./asr-models";
 import { db, schema } from "./db";
-import { env } from "./env";
+import { asrModel, env } from "./env";
 import {
   applyPolish,
   getRecordingRow,
@@ -10,10 +19,37 @@ import {
   setRecordingState,
   setSummary,
 } from "./recording-server";
+import {
+  agentKeyFor,
+  assertContextRoom,
+  countRecordings,
+  sessionOfRecording,
+  spendContext,
+  touchSession,
+} from "./session-server";
 import { DEFAULT_SUMMARY_PROMPT } from "./types";
 
 /**
- * BentoAgent 로 나가는 두 갈래.
+ * BentoAgent 로 나가는 세 갈래.
+ *
+ * ## 0. 세션 — **어느 자루에 담기는가**
+ *
+ * 부를 때마다 `sessionId` 를 함께 보낸다. 그것이 이 녹음이 처리되는 세션의
+ * 에이전트 열쇠다 (`session-server.ts` 의 `agentKeyFor`). 세션이 없는
+ * 녹음이면 예전 그대로 녹음 id 다 — 그때는 녹음 하나가 곧 세션이다.
+ *
+ * **왜 하나로 모으나.** 예전에는 다듬기가 일회용 세션(`ephemeral`)이었다.
+ * 그래서 방금 다듬으며 정한 화자 이름과 용어를 대화창이 전혀 몰랐고, 사람은
+ * 같은 것을 대화창에 다시 설명해야 했다. 같은 세션에서 돌면 대화가 그것을
+ * 이어받는다. 주간 회의처럼 되풀이되는 자리에서는 지난 회차까지 물려받는다.
+ *
+ * **알려 줄 것 — 이 파일만 고쳐서는 반쪽이다.** 대화(`/voice`)는 저쪽이
+ * `recordingId` 를 그대로 세션 열쇠로 쓰므로 여기서 열쇠를 실어 보내면
+ * 오늘부터 세션 단위로 이어진다. 다듬기(`/voice/polish`)는 저쪽이 아직
+ * `session: "ephemeral"` 이라, **BentoAgent 가 `sessionId` 를 보고
+ * `session: { voice: sessionId }` 로 바꾸고 줄도 `voice:${sessionId}` 로
+ * 옮겨야** 완성된다. 그때까지 다듬기는 예전처럼 일회용으로 돈다 — 우리 쪽은
+ * 이미 그 손잡이를 보내고 있으므로 저쪽 한 줄이면 이어진다.
  *
  * ## 1. 다듬기 — `/voice/polish`
  *
@@ -48,6 +84,24 @@ export class AgentUnavailableError extends Error {
   constructor(message: string) {
     super(message);
     this.name = "AgentUnavailableError";
+  }
+}
+
+/**
+ * **저쪽 세션이 찼다.** 우리 상한(`SESSION_CONTEXT_LIMIT`)과 다른 상한이다.
+ *
+ * 두 상한이 따로 있는 이유: 우리는 **부은 날 것**을 세고, 저쪽은 오간 글자를
+ * 통째로 센다(프롬프트 + 답). 저쪽이 더 크게 세므로 우리 눈금이 아직
+ * 여유로운데 저쪽이 먼저 차는 일이 실제로 생긴다. 그때 이 오류가 온다.
+ *
+ * 고치는 길은 우리 쪽이 찼을 때와 같다 — 새 세션으로 옮기거나 `rollover`.
+ * 열쇠를 갈면 저쪽에서도 새 세션이 열리므로 저쪽 눈금도 함께 0이 된다.
+ * 그래서 화면에는 같은 갈래로 올려 보낸다.
+ */
+export class AgentSessionFullError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "AgentSessionFullError";
   }
 }
 
@@ -197,7 +251,7 @@ async function readStatus(path: string, id: string): Promise<JobStatus> {
  * 에이전트가 돌려줘야 하는 모양.
  *
  * ```json
- * {"segments":[{"i":0,"text":"다듬은 글","speaker":"진행자"}, …]}
+ * {"segments":[{"i":0,"text":"다듬은 글","speaker":"진행자","flag":null}, …]}
  * ```
  *
  * `i` 는 우리가 보낸 조각 번호 그대로다. `text` 와 `speaker` 는 없으면 안
@@ -207,11 +261,25 @@ async function readStatus(path: string, id: string): Promise<JobStatus> {
  * 왜 이렇게까지 하나: 여기 실려 오는 것은 남이 만든 파일에서 나온 글이고,
  * 그것을 읽은 모델의 출력이다. `speaker` 칸에 무엇이 들어오든 그것은 화면에
  * 사람 이름처럼 뜬다. 아는 칸만 취하고 길이를 자르는 것이 그 사이의 유일한 문이다.
+ *
+ * ## `flag` — **다듬는 대신 표시하기**
+ *
+ * 새로 생긴 칸이다. 이 전사 모델은 못 알아듣는 소리에 빈 글이 아니라
+ * 그럴듯한 영어를 지어내는데(실측), 그 사실을 모르는 에이전트는 그 헛소리를
+ * 매끄러운 문장으로 "다듬어" 버린다. 다듬고 나면 사람이 한 말인지 기계가
+ * 지어낸 것인지 가를 길이 사라진다.
+ *
+ * 그래서 모델의 서술을 **넘기고**(`modelBrief`, 몸통의 `model` 칸), 다듬는 대신 표시하게
+ * 하고, 그 표시를 이 칸으로 돌려받는다. 값은 `SEGMENT_FLAGS` 넷 중 하나이고
+ * **모르는 값은 버린다** — 버려도 표시가 없는 것과 같아지므로 언제나 안전한
+ * 실패다. 자유 문장을 안 받는 이유는 `asr-models.ts` 에 적어 두었다.
  */
 export interface PolishItem {
   i: number;
   text?: string;
   speaker?: string | null;
+  /** 표시. `null` 이면 "이번에는 표시할 것이 없다" 는 뜻이라 지운다. */
+  flag?: SegmentFlag | null;
 }
 
 /** 화자 이름의 상한. 여기에 문장이 들어오면 그건 화자 이름이 아니다. */
@@ -276,8 +344,29 @@ function readItems(list: unknown): PolishItem[] | null {
       if (speaker !== undefined) item.speaker = speaker;
     }
 
-    // 아무것도 안 바꿀 항목은 넣지 않는다. 빈 UPDATE 가 도는 것을 막는다.
-    if (item.text !== undefined || item.speaker !== undefined) out.push(item);
+    /*
+     * 표시는 **아는 값 넷만** 받는다.
+     *
+     * 모르는 값이 오면 조용히 버린다 (표시 없음과 같아진다). 여기서 관대해질
+     * 이유가 하나도 없다 — 이 값은 화면에 딱지로 뜨고, 그 딱지가 뜻하는 것은
+     * "이 줄은 사람이 한 말이 아닐 수 있다" 같은 무거운 말이다. 모르는 값을
+     * 받아 그대로 띄우면 그 무게가 아무 근거 없이 붙는다.
+     */
+    const rawFlag = (v as { flag?: unknown }).flag;
+    if (isSegmentFlag(rawFlag)) item.flag = rawFlag;
+    else if (rawFlag === null || rawFlag === "" || rawFlag === undefined) item.flag = null;
+    else item.flag = null;
+
+    /*
+     * 아무것도 안 바꿀 항목은 넣지 않는다.
+     *
+     * `flag` 는 세지 않는다 — 위에서 늘 넣기 때문이다. 표시만 있고 글도
+     * 화자도 없는 줄은 "이 조각을 손대지 않았다" 는 뜻인데, 그것만으로도
+     * 얹을 값이 있다 (앞선 다듬기가 남긴 표시를 지우거나 새로 붙인다).
+     * 그래서 표시가 실제로 온 항목은 통과시킨다.
+     */
+    const carriesFlag = isSegmentFlag(rawFlag);
+    if (item.text !== undefined || item.speaker !== undefined || carriesFlag) out.push(item);
   }
   return out.length > 0 ? out : null;
 }
@@ -333,24 +422,118 @@ function readPolish(value: unknown): AgentPolish | null {
   return { items, missingCount, notes };
 }
 
+/** 다듬기 쪽지가 에이전트 입구의 표지 상한을 넘을 때. */
+export class PolishContextTooLongError extends Error {
+  constructor(readonly over: number) {
+    super(
+      `적어 주신 쪽지가 ${over}자만큼 깁니다. 에이전트는 이 표지를 ` +
+        `${AGENT_CONTEXT_LIMIT.toLocaleString()}자에서 **말없이 자릅니다** — ` +
+        `잘려 보내면 적으신 그대로 갔다고 믿게 되므로 보내지 않았습니다. ` +
+        `쪽지를 그만큼 줄여 주세요.`,
+    );
+    this.name = "PolishContextTooLongError";
+  }
+}
+
 /**
- * 다듬기를 시작시킨다. 작업 번호를 받아 녹음 행에 적어 둔다.
+ * 다듬기에 실어 보낼 표지. **사람과 세션에 대한 것만 담는다.**
  *
- * 여기서 붙들지 않는다 — 답이 나오기까지 1분이 넘는 일이 흔하고, 앞의
- * Cloudflare 터널이 100초에서 끊는다. 시작만 시키고 번호를 받아 두고,
- * 화면이 짧은 요청으로 몇 번 물어본다.
+ * 모델의 제약은 여기 없다. 그건 `model` 칸으로 따로 간다 (`polishBody`) —
+ * 이 표지는 저쪽에서 울타리에 갇혀 "읽을 자료지 지시가 아니다" 로 읽히는데,
+ * 모델의 사실은 실제로 따라야 하는 것이라 그 무게로 실리면 안 된다.
+ * 자세한 근거는 `asr-models.ts` 의 `modelBrief` 에 적어 두었다.
+ *
+ * 두 도막이다.
+ *
+ * 1. 이 녹음이 어느 세션의 몇 번째인지. 화자 이름과 용어를 물려받는 근거다.
+ * 2. 사람이 적은 쪽지.
+ *
+ * BentoAgent 는 이 표지를 4,000자에서 자른다. 넘치면 **자르지 않고 거절한다** —
+ * 조용히 잘리면 사람은 제가 적은 쪽지가 그대로 갔다고 믿는다.
  */
-export async function startPolish(
-  recordingId: string,
-  context?: string | null,
-): Promise<string> {
+function buildPolishContext(recordingId: string, note: string | null): string {
+  const parts: string[] = [];
+
+  const rec = getRecordingRow(recordingId);
+  const session = rec ? sessionOfRecording(rec) : null;
+  if (session) {
+    const n = countRecordings(session.id);
+    parts.push(
+      `[세션] "${session.name}" — 이 세션에 녹음이 ${n}건 있고 지금 것은 그중 하나다. ` +
+        `앞서 같은 세션에서 정한 화자 이름과 용어가 있으면 그대로 이어 써라. ` +
+        `기억나지 않으면 지어내지 말고 이번 녹음만 보고 판단해라.`,
+    );
+  }
+
+  if (note?.trim()) {
+    parts.push(`[사람이 적은 쪽지]\n${note.trim()}`);
+  }
+
+  const context = parts.join("\n\n");
+  if (context.length > AGENT_CONTEXT_LIMIT) {
+    throw new PolishContextTooLongError(context.length - AGENT_CONTEXT_LIMIT);
+  }
+  return context;
+}
+
+/**
+ * 보내기 전에 값싼 검사만 먼저 한다. **줄을 서기 전에 물어보는 자리다.**
+ *
+ * 다듬기는 같은 세션끼리 줄을 서므로, 앞엣것이 끝난 뒤에야 "전사문이 너무
+ * 큽니다" 를 알게 되면 사람은 몇 분을 기다린 뒤에 실패를 본다. 줄에 세우기
+ * 전에 알 수 있는 것은 여기서 다 본다 (조각이 있나 · 몸통이 상한 안쪽인가 ·
+ * 표지가 안 넘치나). 돌려주는 것은 그때 쓸 표지다.
+ */
+export function checkPolishable(recordingId: string, note: string | null): string {
   const segments = listSegments(recordingId);
   if (segments.length === 0) {
     throw new AgentUnavailableError("다듬을 전사문이 아직 없습니다");
   }
+  const context = buildPolishContext(recordingId, note);
+  const bytes = polishBodyBytes(recordingId, segments, context);
+  const limit = env.AGENT_MAX_BODY_KB * 1024;
+  if (bytes > limit) throw new TranscriptTooLargeError(bytes, limit);
 
-  const body = {
+  /*
+   * 세션 맥락도 **여기서** 먼저 본다. 실제로 적는 것은 차례가 온 뒤지만
+   * (`startPolish` 의 `spendContext`), 이미 꽉 찬 세션이면 몇 분 기다린 뒤에
+   * 그 말을 듣게 할 이유가 없다.
+   */
+  const rec = getRecordingRow(recordingId);
+  assertContextRoom(rec?.sessionId ?? null, polishContextCost(segments));
+  return context;
+}
+
+/** 다듬기 한 번이 세션 맥락에서 쓰는 양. 저쪽 세션에 실려 들어가는 날 것의 길이다. */
+function polishContextCost(segments: PolishSegments): number {
+  return segments.reduce((n, s) => n + s.raw.length, 0);
+}
+
+type PolishSegments = ReturnType<typeof listSegments>;
+
+function polishBody(recordingId: string, segments: PolishSegments, context: string) {
+  const rec = getRecordingRow(recordingId);
+  return {
     recordingId,
+    /**
+     * 이 녹음이 처리되는 세션의 에이전트 열쇠.
+     *
+     * BentoAgent 가 이것을 보고 `session: { voice: sessionId }` 로 이어 붙이면
+     * 다듬은 결과를 대화창이 물려받는다. 아직 안 보고 있으면 그냥 무시되고
+     * 예전처럼 일회용으로 돈다 — 더해도 깨지는 것이 없는 칸이다.
+     */
+    sessionId: rec ? agentKeyFor(rec) : recordingId,
+    /**
+     * 이 전사문을 만든 기계의 서술.
+     *
+     * 저쪽이 이것을 프롬프트 앞머리에 **울타리 없이** 싣는다. 안 보내면
+     * 저쪽은 "앱이 알려 주지 않았다 — 아는 척하지 마라" 를 대신 싣고, 그러면
+     * 못 알아들은 자리를 표시하는 판단의 근거가 통째로 사라진다.
+     *
+     * 모델을 갈아 끼우면 다음 요청부터 저절로 바뀐다. 저쪽에는 기본값이
+     * 없다 — 그것이 서술자를 한 곳에 모은 값이다.
+     */
+    model: modelBrief(asrModel),
     /*
      * `raw` 를 보낸다. 이미 다듬은 `text` 가 아니다.
      *
@@ -363,24 +546,81 @@ export async function startPolish(
       end: Number(s.end.toFixed(2)),
       raw: s.raw,
     })),
-    ...(context ? { context } : {}),
+    context,
   };
+}
+
+function polishBodyBytes(
+  recordingId: string,
+  segments: PolishSegments,
+  context: string,
+): number {
+  return Buffer.byteLength(JSON.stringify(polishBody(recordingId, segments, context)));
+}
+
+/**
+ * 다듬기를 시작시킨다. 작업 번호를 받아 녹음 행에 적어 둔다.
+ *
+ * 여기서 붙들지 않는다 — 답이 나오기까지 1분이 넘는 일이 흔하고, 앞의
+ * Cloudflare 터널이 100초에서 끊는다. 시작만 시키고 번호를 받아 두고,
+ * 화면이 짧은 요청으로 몇 번 물어본다.
+ *
+ * **세션 맥락을 여기서 센다.** 보낸 날 것의 길이만큼 세션이 자란다. 상한을
+ * 넘으면 `SessionContextFullError` 가 나고, 그때는 조용히 자르지 않고
+ * 사람에게 두 갈래를 말한다 (`session-server.ts`).
+ */
+export async function startPolish(
+  recordingId: string,
+  context?: string | null,
+): Promise<string> {
+  const segments = listSegments(recordingId);
+  if (segments.length === 0) {
+    throw new AgentUnavailableError("다듬을 전사문이 아직 없습니다");
+  }
+
+  const cover = context ?? buildPolishContext(recordingId, null);
+  const body = polishBody(recordingId, segments, cover);
 
   const limit = env.AGENT_MAX_BODY_KB * 1024;
   const bytes = Buffer.byteLength(JSON.stringify(body));
   if (bytes > limit) throw new TranscriptTooLargeError(bytes, limit);
 
+  /*
+   * 맥락을 먼저 잡는다. **보내고 나서 세면 늦다** — 상한을 넘긴 요청이
+   * 이미 저쪽 세션에 들어간 뒤가 된다. 여기서 던지면 아무것도 안 보낸 것이다.
+   */
+  const rec = getRecordingRow(recordingId);
+  spendContext(rec?.sessionId ?? null, polishContextCost(segments));
+
   const res = await agentFetch("/voice/polish", { method: "POST", body });
   if (res.status === 404) {
     throw new AgentUnavailableError(
       "에이전트에 /voice/polish 입구가 없습니다. BentoAgent 의 src/http.ts 에 " +
-        "그 자리를 만들어야 합니다 (계약: { recordingId, segments, context? } → 202 { id }).",
+        "그 자리를 만들어야 합니다 (계약: { recordingId, sessionId, segments, context } → 202 { id }).",
     );
+  }
+  if (res.status === 409) {
+    /*
+     * 저쪽 세션이 찼다. **날것의 JSON 을 화면에 흘리지 않는다** — 저쪽 문장은
+     * 이미 사람이 읽을 수 있게 쓰여 있고 무엇을 하면 되는지도 적혀 있다.
+     * (`readJsonBody` 로 보내면 "에이전트가 다듬기를 거절했습니다 (409): {…}"
+     * 가 그대로 뜬다.)
+     */
+    const text = await res.text();
+    let why = "";
+    try {
+      const j = JSON.parse(text) as { error?: unknown; sessionFull?: unknown };
+      if (typeof j.error === "string") why = j.error;
+    } catch {
+      /* 모양이 아니면 아래에서 날것을 쓴다 */
+    }
+    throw new AgentSessionFullError(why || text.slice(0, 300));
   }
   const json = await readJsonBody<{ id?: unknown }>(res, "다듬기");
   if (typeof json.id !== "string" || !json.id) {
     throw new AgentUnavailableError("에이전트가 작업 번호를 주지 않았습니다");
   }
+  touchSession(rec?.sessionId ?? null);
   return json.id;
 }
 
@@ -462,6 +702,31 @@ export async function advancePolish(recordingId: string): Promise<void> {
    * "왜 저기만 화자가 없지" 하게 된다.
    */
   const leftovers: string[] = [];
+
+  /*
+   * 표시된 줄이 있으면 **말한다.**
+   *
+   * 화면에 딱지가 뜨지만 그건 그 줄을 들여다봐야 보인다. 특히 지어낸 것으로
+   * 짚은 줄은 "다듬었습니다" 만 보고 지나치면 안 되는 것이라, 끝났다는 말과
+   * 같은 자리에 수를 적어 준다. 세 줄이 넘으면 종류별로 접어 적는다.
+   */
+  const flagged = items.filter((i) => i.flag);
+  if (flagged.length) {
+    const byKind = new Map<string, number>();
+    for (const i of flagged) byKind.set(i.flag!, (byKind.get(i.flag!) ?? 0) + 1);
+    const label: Record<string, string> = {
+      "other-language": "이 모델이 모르는 말",
+      hallucinated: "기계가 지어낸 것 같은 글",
+      unclear: "알아볼 수 없는 자리",
+      "cut-off": "조각 끝에서 잘린 말",
+    };
+    leftovers.push(
+      `표시된 줄 ${flagged.length}개: ` +
+        [...byKind].map(([k, n]) => `${label[k] ?? k} ${n}개`).join(", ") +
+        ". 그 줄들은 다듬지 않고 받아 적은 그대로 두었습니다.",
+    );
+  }
+
   if (fromAgent?.missingCount) {
     leftovers.push(
       `조각 ${fromAgent.missingCount}개는 다듬지 못했습니다 (긴 녹음이면 뒷부분입니다). ` +
@@ -494,22 +759,198 @@ function finishPolish(recordingId: string, error: string | null): void {
   );
 }
 
+const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+
 /**
- * 창을 닫고 가도 끝은 나게 한다.
+ * 이 녹음의 다듬기가 끝날 때까지 붙들고 있는다.
  *
- * 화면이 물어보는 것이 진행을 미는 주된 힘이고, 이건 그 보조다. 프로세스가
- * 다시 뜨면 이 타이머는 사라지지만 그때는 부팅 시 회수(`recoverStaleJobs`)가
- * 줄을 정리한다 — 영영 `polishing` 인 줄은 남지 않는다.
+ * **줄을 세우기 위해 있는 함수다.** 세션 하나는 저쪽에서 claude 세션 하나라
+ * 같은 세션의 다듬기가 겹치면 안 되는데, "시작만 시키고 놓아 주면" 겹친다 —
+ * 시작은 몇 초지만 실제 작업은 몇 분이다. 그래서 줄을 잡은 쪽이 끝까지
+ * 기다린다.
+ *
+ * 창을 닫고 가도 끝나게 하는 일도 겸한다. 화면이 물어보는 것이 진행을 미는
+ * 주된 힘이고 이건 그 보조다. 프로세스가 다시 뜨면 이 고리는 사라지지만
+ * 그때는 부팅 시 회수(`recoverStaleJobs`)가 정리한다 — 영영 `polishing` 인
+ * 줄은 남지 않는다.
  */
-export function drivePolishInBackground(recordingId: string): void {
+/**
+ * 이 줄이 아직 **내 작업**을 붙들고 있나.
+ *
+ * 상태가 `polishing` 인지만 보면 안 된다. 내 작업이 끝나 상태가 `done` 이 된
+ * 뒤 줄이 풀리기 직전(최대 0.5초)에 같은 녹음의 다음 다듬기가 들어오면, 그쪽이
+ * 상태를 다시 `polishing` 으로 올린다 — 그러면 이 고리는 "아직 도는 중" 으로
+ * 읽고 **줄을 놓지 않는다.** 다음 차례는 영영 시작되지 않고 녹음은 번호 없는
+ * `polishing` 에 갇힌다. 그 상태에서는 `POST …/polish` 가 전부 409
+ * "이미 다듬고 있습니다" 라서 사람이 할 수 있는 일이 없다.
+ *
+ * 실측으로 밟았다: 다듬기가 끝나자마자 다시 누르니 그 녹음이 기한(15분 30초)이
+ * 지날 때까지 잠겼다. 사람이 실제로 하는 동작이다 — 단추는 끝나는 순간 켜진다.
+ *
+ * 그래서 상태가 아니라 **작업 번호**로 묶는다. 번호가 바뀌었으면 그 일은
+ * 이제 내 것이 아니고, 놓아 주는 것이 맞다.
+ */
+function stillMine(recordingId: string, jobId: string): boolean {
+  const row = getRecordingRow(recordingId);
+  return !!row && row.state === "polishing" && row.polishJobId === jobId;
+}
+
+/** 에이전트에게 물어보는 간격. */
+const POLL_MS = 4000;
+/**
+ * 물어보는 사이에 상태를 들여다보는 간격.
+ *
+ * **줄을 붙들고 있는 시간을 짧게 하려고 있다.** 화면의 폴링도 같은 일을
+ * 밀고 있어서(`GET …/polish` 가 `advancePolish` 를 부른다) 우리가 자는 동안
+ * 다듬기가 끝나 있는 일이 흔하다. 4초를 통으로 자면 그 4초 동안 줄이 잡혀
+ * 있고, 같은 세션의 다음 녹음이 이유 없이 "줄을 섰습니다" 를 듣는다.
+ * 실제로 시험에서 그렇게 나왔다. DB 는 같은 프로세스의 SQLite 라 0.5초마다
+ * 한 줄 읽는 값은 없는 것이나 마찬가지다.
+ */
+const WATCH_MS = 500;
+
+async function driveToDone(recordingId: string, jobId: string): Promise<void> {
   const started = Date.now();
-  const tick = async () => {
+  for (;;) {
+    if (!stillMine(recordingId, jobId)) return;
+    /*
+     * 기한을 넘기면 놓아 준다. `advancePolish` 가 같은 기한으로 그 줄을
+     * 실패로 접으므로 여기서 접지 않는다 — 접는 자리가 둘이면 문장이 둘이 된다.
+     * 30초를 더 두는 것은 저쪽이 먼저 접을 틈을 주려는 것이다.
+     */
     if (Date.now() - started > JOB_DEADLINE_MS + 30_000) return;
+
+    for (let waited = 0; waited < POLL_MS; waited += WATCH_MS) {
+      await sleep(WATCH_MS);
+      if (!stillMine(recordingId, jobId)) return;
+    }
     await advancePolish(recordingId).catch(() => undefined);
-    const row = getRecordingRow(recordingId);
-    if (row?.state === "polishing") setTimeout(() => void tick(), 4000);
-  };
-  setTimeout(() => void tick(), 4000);
+  }
+}
+
+/** 이미 다듬는 중이라 새로 시작할 수 없다. 라우트가 409 로 옮긴다. */
+export class PolishBusyError extends Error {
+  constructor() {
+    super("이미 다듬고 있습니다");
+    this.name = "PolishBusyError";
+  }
+}
+
+export interface PolishHandle {
+  /** 실제로 시작했으면 작업 번호. 줄을 섰으면 null. */
+  jobId: string | null;
+  queued: boolean;
+  /** 같은 세션에서 앞에 몇 건이 있나. */
+  aheadInSession: number;
+}
+
+/**
+ * 다듬기를 줄에 세운다. **같은 세션의 다듬기는 하나씩 돈다.**
+ *
+ * ## 왜 줄을 세우나
+ *
+ * 세션 하나는 저쪽에서 claude 세션 하나이고, 거기에 `--resume` 이 동시에 둘
+ * 붙으면 맥락이 꼬인다. 그리고 겹치는 일은 드물지 않다 — 회의 녹음 셋을 한
+ * 세션에 나란히 올리면 전사가 끝나는 대로 다듬기가 **저절로** 시작되므로
+ * 셋이 겹친다.
+ *
+ * 저쪽에도 방어가 있지만 지금 그 줄은 녹음 번호로 서 있어서
+ * (`voice-polish:${recordingId}`) 같은 세션의 다른 녹음끼리는 안 막힌다.
+ * 여기 아니면 아무 데도 안 막힌다는 뜻이다.
+ *
+ * ## 거절하지 않고 줄을 세우는 이유
+ *
+ * "이미 다른 녹음을 다듬는 중입니다, 나중에 다시 누르세요" 로 끝낼 수도
+ * 있다. 하지만 전사 뒤의 다듬기는 **사람이 누르는 것이 아니라 저절로
+ * 시작되는 것**이라, 거절하면 둘째 녹음은 영영 안 다듬어진다. 그래서 세운다.
+ *
+ * ## 값싼 검사는 줄 서기 **전에**
+ *
+ * 조각이 있나 · 몸통이 상한 안쪽인가 · 표지가 안 넘치나는 여기서 먼저 본다.
+ * 몇 분 기다린 뒤에 "전사문이 너무 큽니다" 를 듣는 것은 아무 도움이 안 된다.
+ */
+export async function queuePolish(
+  recordingId: string,
+  note: string | null,
+): Promise<PolishHandle> {
+  const row = getRecordingRow(recordingId);
+  if (!row) throw new AgentUnavailableError("녹음을 찾을 수 없습니다");
+
+  // 줄에 서기 전에 값싼 것부터. 여기서 던지는 것은 라우트가 상태 코드로 옮긴다.
+  const context = checkPolishable(recordingId, note);
+
+  const key = agentKeyFor(row);
+  const wasBusy = laneBusy(key);
+
+  /*
+   * 줄에 선 것도 **다듬는 중**이다. 상태를 먼저 옮겨 둔다.
+   *
+   * `polishJobId` 가 null 인 `polishing` 이 곧 "줄에 서 있다" 는 뜻이다.
+   * `advancePolish` 는 번호가 없으면 아무 일도 안 하므로, 화면이 그동안
+   * 물어봐도 탈이 없다.
+   *
+   * **끝난 줄에서만 옮긴다.** 라우트가 이미 `polishing` 을 409 로 막지만, 그
+   * 검사와 여기 사이에 `await req.json()` 이 하나 있다. 둘이 나란히 들어오면
+   * 둘 다 그 검사를 지나고, 조건 없이 쓰면 나중 것이 **먼저 것의 작업 번호를
+   * 지운다** — 이미 도는 호출 하나가 주인을 잃는다.
+   */
+  const claimed = setRecordingState(
+    recordingId,
+    {
+      state: "polishing",
+      polishJobId: null,
+      polishError: null,
+      polishStartedAt: new Date(),
+    },
+    ["done", "failed"],
+  );
+  if (!claimed) throw new PolishBusyError();
+
+  let settle: (r: { jobId?: string; error?: unknown }) => void = () => undefined;
+  const started = new Promise<{ jobId?: string; error?: unknown }>((resolve) => {
+    settle = resolve;
+  });
+
+  /*
+   * 줄을 **동기적으로** 잡는다 (`inLane` 이 그렇게 만들어져 있다). 비었나
+   * 보고 나서 await 를 하나라도 지나면 그 틈으로 둘이 나란히 들어온다.
+   */
+  void inLane(key, async () => {
+    const now = getRecordingRow(recordingId);
+    // 기다리는 동안 사람이 다시 전사를 눌렀거나 지웠을 수 있다.
+    if (!now || now.state !== "polishing" || now.polishJobId) {
+      settle({});
+      return;
+    }
+
+    let jobId: string;
+    try {
+      jobId = await startPolish(recordingId, context);
+    } catch (e) {
+      finishPolish(recordingId, e instanceof Error ? e.message : String(e));
+      settle({ error: e });
+      return;
+    }
+
+    // 기한은 **여기서** 다시 잡는다. 줄에서 기다린 시간은 에이전트 탓이 아니다.
+    setRecordingState(
+      recordingId,
+      { polishJobId: jobId, polishStartedAt: new Date() },
+      ["polishing"],
+    );
+    settle({ jobId });
+
+    await driveToDone(recordingId, jobId);
+  });
+
+  if (wasBusy) {
+    // 앞엣것이 끝나야 시작한다. 화면은 `state` 만 따라가면 된다.
+    return { jobId: null, queued: true, aheadInSession: Math.max(0, laneDepth(key) - 1) };
+  }
+
+  const r = await started;
+  if (r.error) throw r.error;
+  return { jobId: r.jobId ?? null, queued: false, aheadInSession: 0 };
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -557,12 +998,16 @@ function fenceUntrusted(text: string): string {
   return `<untrusted>\n${safe}\n</untrusted>`;
 }
 
-/** 요약에 넘길 전사문 한 덩어리. 화자가 있으면 살린다. */
+/** 요약에 넘길 전사문 한 덩어리. 화자와 표시가 있으면 살린다. */
 function transcriptText(recordingId: string): { text: string; truncated: boolean } {
   const segments = listSegments(recordingId);
   const lines = segments.map((s) => {
     const stamp = formatStamp(s.start);
-    return s.speaker ? `[${stamp}] ${s.speaker}: ${s.text}` : `[${stamp}] ${s.text}`;
+    // 표시가 붙은 줄은 그대로 요약에 들어가면 안 되는 줄이다. 그 사실을 함께 적는다.
+    const mark = s.flag ? ` [${s.flag}]` : "";
+    return s.speaker
+      ? `[${stamp}]${mark} ${s.speaker}: ${s.text}`
+      : `[${stamp}]${mark} ${s.text}`;
   });
   const joined = lines.join("\n");
   if (joined.length <= SUMMARY_INPUT_CHARS) return { text: joined, truncated: false };
@@ -589,14 +1034,111 @@ function transcriptText(recordingId: string): { text: string; truncated: boolean
  */
 export const CHAT_CONTEXT_CHARS = 200_000;
 
+/** 세션 로스터에 적는 형제 녹음의 수. 넘치면 그 사실을 함께 적는다. */
+const ROSTER_LIMIT = 30;
+
+/**
+ * 대화가 이어질 자루의 이름. **프록시가 이것을 `recordingId` 칸에 실어 보낸다.**
+ *
+ * 저쪽 `/voice` 는 `recordingId` 를 **열쇠로만** 쓴다 (`isChatKey` 로 모양만
+ * 보고 claude 세션을 그 이름으로 잡는다). 그래서 여기에 세션 열쇠를 넣으면
+ * 오늘 당장, 저쪽을 한 줄도 안 고치고, 대화가 세션 단위로 이어진다 — 같은
+ * 세션의 두 녹음을 오가며 물어도 한 대화다. 그것이 "한 전사문은 한 세션에서"
+ * 의 절반이다 (나머지 절반인 다듬기는 저쪽 한 줄이 필요하다).
+ *
+ * 진짜 녹음 번호는 잃지 않는다 — `chatContext` 의 머리에 적어 보낸다.
+ *
+ * 세션이 없는 녹음은 예전 그대로 녹음 id 다. 그래야 저쪽에 이미 쌓여 있는
+ * 대화 기록이 고아가 되지 않는다.
+ */
+export function agentModelBrief(): AgentModelBrief {
+  return modelBrief(asrModel);
+}
+
+export function chatKey(recordingId: string): string {
+  const row = getRecordingRow(recordingId);
+  return row ? agentKeyFor(row) : recordingId;
+}
+
+/**
+ * 대화 한 턴이 세션 맥락을 이만큼 쓴다고 적어 둔다.
+ *
+ * 대화는 **매 턴 전사문을 통째로 다시 싣는다** (저쪽에 도구가 없어서). 그
+ * 말은 세션 기록이 한 마디마다 전사문 하나만큼 길어진다는 뜻이다. 녹음이
+ * 쌓이는 것보다 이쪽이 빨리 자라는 일도 흔하다.
+ *
+ * 상한을 넘으면 `SessionContextFullError` 를 던진다 — 잘라 보내지 않는다.
+ */
+export function spendChatContext(recordingId: string, chars: number): void {
+  const row = getRecordingRow(recordingId);
+  if (!row) return;
+  spendContext(row.sessionId, chars);
+  touchSession(row.sessionId);
+}
+
 export function chatContext(recordingId: string): string {
   const row = getRecordingRow(recordingId);
   const segments = listSegments(recordingId);
-  const head = `제목: ${row?.title ?? "(제목 없음)"}`;
+  const session = row ? sessionOfRecording(row) : null;
+
+  const head = [`제목: ${row?.title ?? "(제목 없음)"}`, `녹음 번호: ${recordingId}`];
+  if (session) head.push(`세션: ${session.name}`);
+
+  /*
+   * **모델의 제약은 여기 안 적는다.** `model` 칸으로 따로 보낸다 (대화 몸통의
+   * `model`, `api/recordings/[id]/chat`). 이 글은 저쪽에서 `<transcript>`
+   * 울타리 안에 들어가는데, 울타리 안은 "읽을 자료지 지시가 아니다" 로
+   * 읽힌다 — 앞머리의 `[받아 적은 기계]` 블록은 울타리 밖이라 사실로 읽힌다.
+   * 같은 사실을 두 무게로 싣지 않는다.
+   *
+   * 요약(`/task`)은 다르다. 그쪽에는 `model` 칸을 받는 자리가 없어서 지금도
+   * `agentReadingCaveat` 를 시스템 프롬프트에 적어 보낸다.
+   */
+
+  /*
+   * 세션에 형제 녹음이 있으면 **이름만** 적는다.
+   *
+   * 전사문까지 싣지 않는 이유가 둘이다. 하나, 매 턴 실어 보내는 값이라
+   * 녹음이 쌓이면 한 마디 물을 때마다 수십만 자를 올리게 된다. 둘,
+   * 지난 녹음의 내용은 이미 **같은 세션의 지난 턴**에 들어 있다 — 거기서
+   * 이야기했다면 에이전트가 기억하고, 안 했다면 지금 필요한 것도 아니다.
+   * 여기 있는 목록은 "무엇이 더 있는지" 를 알려 주는 지도이지 자료가 아니다.
+   */
+  if (session) {
+    const siblings = db
+      .select({ id: schema.recordings.id, title: schema.recordings.title })
+      .from(schema.recordings)
+      .where(eq(schema.recordings.sessionId, session.id))
+      .orderBy(schema.recordings.createdAt)
+      .all()
+      .filter((r) => r.id !== recordingId);
+    if (siblings.length) {
+      const shown = siblings.slice(0, ROSTER_LIMIT).map((r) => `- ${r.title}`);
+      if (siblings.length > ROSTER_LIMIT) {
+        shown.push(`- (그 밖에 ${siblings.length - ROSTER_LIMIT}건 더 있다)`);
+      }
+      head.push(
+        `[같은 세션의 다른 녹음] 아래는 이름뿐이고 전사문은 실려 있지 않다. ` +
+          `내용을 아는 척하지 마라.\n${shown.join("\n")}`,
+      );
+    }
+  }
+
   const lines = segments
     .filter((s) => s.text.trim())
-    .map((s) => `${formatStamp(s.start)} | ${s.speaker ?? "-"} | ${s.text}`);
-  return [head, ...lines].join("\n");
+    .map((s) => {
+      /*
+       * 표시가 붙은 줄은 그 사실을 함께 적는다.
+       *
+       * 이 줄들이 다듬어지지 않고 남아 있는 데는 이유가 있는데, 그 이유를
+       * 안 알려 주면 에이전트는 그냥 이상한 문장으로 읽고 뜻을 짜내려 한다.
+       * 특히 `hallucinated` — 그건 사람이 한 말이 아니라 기계가 지어낸 것이라
+       * 인용하면 안 되는 줄이다.
+       */
+      const mark = s.flag ? ` [${s.flag}]` : "";
+      return `${formatStamp(s.start)} | ${s.speaker ?? "-"}${mark} | ${s.text}`;
+    });
+  return [...head, "", ...lines].join("\n");
 }
 
 function formatStamp(sec: number): string {
@@ -607,6 +1149,12 @@ function formatStamp(sec: number): string {
   const mm = String(m).padStart(2, "0");
   const ss = String(r).padStart(2, "0");
   return h > 0 ? `${h}:${mm}:${ss}` : `${mm}:${ss}`;
+}
+
+/** 이 녹음이 속한 세션의 에이전트 열쇠. 세션이 없으면 녹음 id. */
+function summaryAgentKey(recordingId: string): string {
+  const row = getRecordingRow(recordingId);
+  return row ? agentKeyFor(row) : recordingId;
 }
 
 /** 요약을 시작시킨다. `summaries` 행에 작업 번호가 앉는다. */
@@ -628,18 +1176,53 @@ export async function startSummary(
     `<instruction>\n${guide}\n</instruction>\n\n` +
     `녹음을 받아 적은 글이다.${tail}\n\n${fenceUntrusted(text)}`;
 
-  const system = ["너는 녹음 전사문을 읽고 사용자가 준 지시문대로 **요약을 쓴다.**", SUMMARY_RULES].join(
-    "\n",
-  );
+  /*
+   * 모델의 제약을 시스템 안내에 함께 싣는다.
+   *
+   * 요약은 `/task` 로 가는 **일회성 호출**이라 앞뒤 맥락이 하나도 없다.
+   * 이 문장이 없으면 못 알아들은 자리에서 나온 헛소리를 그대로 사실로 읽고
+   * 요약에 담는다 — 요약은 사람이 전사문 전체를 안 읽고 대신 읽는 글이라,
+   * 거기 지어낸 것이 섞이면 알아챌 자리가 아예 없다.
+   */
+  const system = [
+    "너는 녹음 전사문을 읽고 사용자가 준 지시문대로 **요약을 쓴다.**",
+    "",
+    "## 이 전사문의 성질",
+    "",
+    agentReadingCaveat(asrModel),
+    "",
+    "줄머리에 대괄호로 표시가 붙은 줄이 있다. 앞선 다듬기가 남긴 것이다.",
+    "- `[hallucinated]` — **사람이 한 말이 아니라 기계가 지어낸 글로 보인다.**",
+    "  요약의 근거로 쓰지 마라. 인용하지도 마라.",
+    "- `[other-language]` — 이 기계가 모르는 말이라 다듬지 않았다. 뜻을 짐작하지 마라.",
+    "- `[unclear]` — 알아볼 수 없어 그대로 두었다.",
+    "- `[cut-off]` — 조각 끝에서 말이 잘렸다. 다음 줄로 이어진다.",
+    "",
+    "이런 줄이 많으면 요약 끝에 그 사실을 한 줄로 적어라 — 무엇을 못 담았는지",
+    "사람이 알아야 한다.",
+    SUMMARY_RULES,
+  ].join("\n");
 
   // 도는 중인 것이 있어도 새로 시작한다 — 사람이 다시 누른 것이 최신 뜻이다.
   upsertSummaryRun(recordingId, { state: "running", jobId: null, error: null, instruction: guide });
 
   let jobId: string;
   try {
+    /*
+     * `sessionId` 를 실어는 보내되 **`/task` 는 여전히 도구도 세션도 없다.**
+     *
+     * 저쪽이 이 칸을 보고 세션에 이어 붙일지는 저쪽이 정한다. 우리가 여기서
+     * `/voice` 로 갈아타지 않은 이유가 있다 — 요약의 재료는 남이 만든 소리를
+     * 받아 적은 글이고, `/task` 는 그런 글을 넣으려고 일부러 **도구 없이,
+     * 세션 없이** 만든 좁은 문이다. 오래 사는 세션에 그 글을 넣으면 녹음
+     * 하나에 섞인 문장이 그 세션의 뒤이은 모든 요청에 살아 있게 된다.
+     *
+     * 그래서 손잡이는 건네되 문은 그대로 둔다. 세션 값(화자 이름·용어)은
+     * 위 `system` 에 실린 사실과 전사문 자체로도 충분히 얻는다.
+     */
     const res = await agentFetch(TASK_PATH, {
       method: "POST",
-      body: { system, prompt, from: "voicebento" },
+      body: { system, prompt, from: "voicebento", sessionId: summaryAgentKey(recordingId) },
     });
     if (res.status === 404) {
       throw new AgentUnavailableError(

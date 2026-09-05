@@ -142,11 +142,14 @@ export function UploadButton({
   onFiles,
   onReject,
   className,
+  /** 아이콘 크기를 줄여 다는 자리가 있다 — 세션 머리말의 지름길 단추. */
+  iconClassName,
   label = "파일 고르기",
 }: {
   onFiles: (files: File[]) => void;
   onReject?: (message: string) => void;
   className?: string;
+  iconClassName?: string;
   label?: string;
 }) {
   const input = useRef<HTMLInputElement | null>(null);
@@ -165,7 +168,7 @@ export function UploadButton({
           className,
         )}
       >
-        <FileVideo className="h-4 w-4" />
+        <FileVideo className={cn("h-4 w-4", iconClassName)} />
         {label}
       </button>
       <input

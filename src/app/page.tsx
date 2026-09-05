@@ -2,6 +2,7 @@ import { RecordingList } from "@/components/recording-list";
 import { env } from "@/lib/env";
 import { MODEL_NOTICE } from "@/lib/model";
 import { listRecordings } from "@/lib/recording-server";
+import { listSessions } from "@/lib/session-server";
 
 /**
  * 녹음 목록. 이 앱의 첫 화면.
@@ -16,13 +17,24 @@ import { listRecordings } from "@/lib/recording-server";
  *
  * `force-dynamic` 인 것은 목록이 사람과 전사 워커 양쪽에서 바뀌기 때문이다.
  * 정적으로 굳으면 새로고침해도 옛 목록이 나온다.
+ *
+ * ## 세션도 여기서 함께 실어 보낸다
+ *
+ * 목록을 **세션별로 묶어** 그리는 것이 기본이라, 세션이 늦게 오면 첫 화면이
+ * 평평한 격자로 한 번 그려졌다가 묶음으로 다시 접힌다. 그 한 번의 접힘이
+ * 카드 자리를 통째로 옮겨서, 마침 누르려던 카드가 손가락 밑에서 도망간다.
+ * 서버에서 함께 읽어 보내면 처음부터 묶여 나온다.
  */
 export const dynamic = "force-dynamic";
 
 export default function HomePage() {
   return (
     <RecordingList
-      initial={{ recordings: listRecordings(), model: MODEL_NOTICE }}
+      initial={{
+        recordings: listRecordings(),
+        sessions: listSessions(),
+        model: MODEL_NOTICE,
+      }}
       /*
        * 형제 앱으로 건너가는 주소.
        *

@@ -55,12 +55,19 @@ export function formatBytes(bytes: number): string {
  * uno 에서 잰 값이다 — VAD 로 자른 뒤 조각마다 디코딩하는 경로의 RTF 가
  * 0.096 이었다 (60분 → 5분 46초, 10분 → 57초). 4코어 CPU 한 대 기준이라
  * 동시에 두 건이 돌면 그만큼 늘어난다. 그래서 "약" 이라고 적고 올려 잡는다.
+ *
+ * **이 숫자는 모델의 것이다.** 그래서 부르는 쪽이 모델 서술자의 `rtf` 를
+ * 넘겨 준다 — 여기 박아 두면 다른 모델을 붙인 날 "1시간 → 약 6분" 이라는
+ * 옛말만 남는다. 서술자를 아직 못 받은 자리를 위해 기본값을 들고 있다.
  */
 export const TRANSCRIBE_RTF = 0.1;
 
-export function estimateTranscribe(seconds: number | null): string | null {
+export function estimateTranscribe(
+  seconds: number | null,
+  rtf: number = TRANSCRIBE_RTF,
+): string | null {
   if (seconds === null || !Number.isFinite(seconds) || seconds <= 0) return null;
-  const est = seconds * TRANSCRIBE_RTF;
+  const est = seconds * (Number.isFinite(rtf) && rtf > 0 ? rtf : TRANSCRIBE_RTF);
   if (est < 60) return `약 ${Math.max(5, Math.round(est / 5) * 5)}초`;
   return `약 ${Math.max(1, Math.round(est / 60))}분`;
 }

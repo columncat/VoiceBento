@@ -1,7 +1,7 @@
 import { apiFetch } from "@/lib/api-path";
 import { api } from "@/lib/client-api";
 import { isUnauthenticated, readJson } from "@/lib/read-json";
-import type { RecordingDTO } from "@/lib/types";
+import type { RecordingWithSession } from "@/lib/types";
 
 /**
  * 미디어 올리는 줄.
@@ -19,6 +19,13 @@ import type { RecordingDTO } from "@/lib/types";
  * 병렬로 올리면 큰 파일 넷이 서로의 대역을 갉아먹어 넷 다 늦게 끝난다.
  * 게다가 뒤에서 전사가 도는데, 그건 워커 하나가 1.6GB 를 쓴다(uno 실측).
  * 올리는 순서가 곧 전사 순서라 앞의 것부터 끝내는 편이 사람에게도 낫다.
+ *
+ * ## 어느 세션으로 가는지는 **줄에 서기 전에** 정해진다
+ *
+ * `enqueueUploads(files, sessionId)` 가 받는 값이 그것이다. 올라간 뒤에
+ * 붙이지 않는다 — 올라가자마자 전사가 돌고, 전사가 끝나면 다듬기가 돈다.
+ * 그때 세션이 안 정해져 있으면 첫 다듬기가 이미 엉뚱한 자리에서 돈 뒤다.
+ * `null` 이면 어느 세션에도 안 붙는다(세션을 지운 뒤의 녹음과 같은 자리).
  *
  * ## `finish` 응답을 두 가지로 받는다
  *
@@ -41,6 +48,10 @@ export interface UploadItem {
   id: string;
   name: string;
   size: number;
+  /** 어느 세션으로 가나. null 이면 안 붙는다. */
+  sessionId: string | null;
+  /** 전송 칸에 적을 세션 이름. 보여 주기 위한 것뿐이다. */
+  sessionName: string | null;
   status: UploadStatus;
   /** 올라간 바이트 수. */
   sent: number;
@@ -55,7 +66,7 @@ const listeners = new Set<Listener>();
 const canceled = new Set<string>();
 const queue: { item: UploadItem; file: File }[] = [];
 let running = false;
-let onReady: ((recording: RecordingDTO) => void) | null = null;
+let onReady: ((recording: RecordingWithSession) => void) | null = null;
 
 const CHUNK_RETRIES = 3;
 
@@ -73,7 +84,7 @@ export function subscribeUploads(l: Listener): () => void {
 }
 
 /** 한 건이 올라가 녹음이 설 때마다 부를 곳. 목록 화면이 그 자리에 끼워 넣는다. */
-export function setUploadSink(fn: ((recording: RecordingDTO) => void) | null): void {
+export function setUploadSink(fn: ((recording: RecordingWithSession) => void) | null): void {
   onReady = fn;
 }
 
@@ -105,12 +116,18 @@ export function titleFromFilename(name: string): string {
   return base.trim() || name;
 }
 
-export function enqueueUploads(files: File[]): void {
+export function enqueueUploads(
+  files: File[],
+  sessionId: string | null,
+  sessionName: string | null = null,
+): void {
   for (const file of files) {
     const item: UploadItem = {
       id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
       name: file.name,
       size: file.size,
+      sessionId,
+      sessionName,
       status: "queued",
       sent: 0,
       startedAt: Date.now(),
@@ -154,7 +171,12 @@ async function uploadOne(item: UploadItem, file: File): Promise<void> {
     const initRes = await apiFetch("/api/upload/init", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ name: file.name, size: file.size, title }),
+      body: JSON.stringify({
+        name: file.name,
+        size: file.size,
+        title,
+        sessionId: item.sessionId,
+      }),
     });
     const init = await readJson<{ uploadId?: string; chunkSize?: number }>(initRes);
     if (!init.uploadId || !init.chunkSize) throw new Error("업로드 자리를 받지 못했습니다");
@@ -188,11 +210,24 @@ async function uploadOne(item: UploadItem, file: File): Promise<void> {
     const finRes = await apiFetch("/api/upload/finish", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ uploadId, title }),
+      /*
+       * `sessionId` 를 `init` 과 `finish` 양쪽에 보낸다.
+       *
+       * 서버가 녹음을 어느 쪽에서 세우든(파일만 확정하고 끝내든, 여기서
+       * 녹음까지 만들든) 세션이 빠지지 않게 하려는 것이다. 한쪽에만 보내면
+       * 서버가 다른 쪽을 골랐을 때 세션 없는 녹음이 조용히 만들어진다.
+       */
+      body: JSON.stringify({ uploadId, title, sessionId: item.sessionId }),
     });
-    const fin = await readJson<{ fileId?: string; recording?: RecordingDTO }>(finRes);
+    const fin = await readJson<{ fileId?: string; recording?: RecordingWithSession }>(finRes);
 
-    const recording = fin.recording ?? (fin.fileId ? await api.create(fin.fileId, title) : null);
+    const recording =
+      fin.recording ??
+      (fin.fileId
+        ? // `SessionPick` 은 둘 중 하나만 준다. 세션이 없으면 아무것도 안 실어 보낸다 —
+          // `sessionId: null` 을 보내면 서버가 "고른 것" 과 "안 고른 것" 을 못 가른다.
+          await api.create(fin.fileId, title, item.sessionId ? { sessionId: item.sessionId } : {})
+        : null);
     if (!recording) throw new Error("올린 파일을 확인하지 못했습니다");
 
     item.status = "done";

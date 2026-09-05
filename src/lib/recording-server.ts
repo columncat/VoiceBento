@@ -1,10 +1,11 @@
 import { and, asc, desc, eq, inArray, sql } from "drizzle-orm";
 
 import { db, schema } from "./db";
-import type { JobState, RecordingRow, SegmentRow } from "./db/schema";
+import type { JobState, RecordingRow, SegmentFlag, SegmentRow } from "./db/schema";
 import type {
   RecordingDTO,
   RecordingNoticeDTO,
+  RecordingWithSession,
   SegmentDTO,
   SummaryDTO,
 } from "./types";
@@ -64,6 +65,11 @@ export function toSegmentDTO(row: SegmentRow): SegmentDTO {
     speaker: row.speaker,
     words: parseWords(row.words),
     edited: row.edited === 1,
+    /*
+     * 다듬기가 붙인 표시. 대개 null 이라 그때는 아예 안 싣는다 — 조각 수천
+     * 줄에 `"flag":null` 을 붙이면 응답이 헛되이 커진다.
+     */
+    ...(row.flag ? { flag: row.flag } : {}),
   };
 }
 
@@ -103,13 +109,30 @@ export function parseNotice(raw: string | null): RecordingNoticeDTO | null {
 //   녹음
 // ─────────────────────────────────────────────────────────────
 
-export function listRecordings(): RecordingDTO[] {
+/**
+ * 목록. 세션 이름까지 한 번의 질의로 붙여 온다.
+ *
+ * 녹음마다 세션을 따로 물으면 목록 한 번에 질의가 N+1 이 된다. 세션은
+ * 없을 수도 있으므로 **왼쪽 바깥 조인**이다 — 안쪽 조인으로 두면 세션 없는
+ * 녹음(세션이 생기기 전 것, 세션이 지워진 것)이 목록에서 통째로 사라진다.
+ */
+export function listRecordings(): RecordingWithSession[] {
   return db
-    .select()
+    .select({ rec: schema.recordings, sessionName: schema.sessions.name })
     .from(schema.recordings)
+    .leftJoin(schema.sessions, eq(schema.recordings.sessionId, schema.sessions.id))
     .orderBy(desc(schema.recordings.createdAt), desc(schema.recordings.id))
     .all()
-    .map(toRecordingDTO);
+    .map((r) => withSession(r.rec, r.sessionName));
+}
+
+/** 녹음 하나에 세션 이름을 얹는다. `RecordingDTO` 는 그대로 두고 넓힌 것만 만든다. */
+export function withSession(row: RecordingRow, sessionName: string | null): RecordingWithSession {
+  return {
+    ...toRecordingDTO(row),
+    sessionId: row.sessionId,
+    sessionName: row.sessionId ? sessionName : null,
+  };
 }
 
 export function getRecordingRow(id: string): RecordingRow | undefined {
@@ -121,6 +144,8 @@ export function createRecording(input: {
   fileId: string | null;
   sourceName?: string;
   sourceSize?: number;
+  /** 이어 붙일 세션. 없으면 null — 그때는 녹음 하나가 곧 세션이다. */
+  sessionId?: string | null;
 }): RecordingRow {
   const id = uid();
   db.insert(schema.recordings)
@@ -130,10 +155,27 @@ export function createRecording(input: {
       fileId: input.fileId,
       sourceName: input.sourceName ?? "",
       sourceSize: input.sourceSize ?? 0,
+      sessionId: input.sessionId ?? null,
       state: "queued",
     })
     .run();
   return getRecordingRow(id)!;
+}
+
+/**
+ * 녹음을 다른 세션으로 옮긴다 (또는 세션에서 떼어 낸다).
+ *
+ * **옮겨도 지난 맥락이 따라가지는 않는다.** 저쪽 세션에 이미 쌓인 것은 옛
+ * 세션에 남아 있고, 새 세션은 다음 다듬기·대화부터 이 녹음을 알게 된다.
+ * 그게 자연스럽다 — 사람이 옮기는 뜻은 "앞으로 여기서 다루자" 이지 "지난
+ * 대화를 저쪽으로 복사하자" 가 아니다.
+ */
+export function setRecordingSession(id: string, sessionId: string | null): RecordingRow | undefined {
+  db.update(schema.recordings)
+    .set({ sessionId, updatedAt: new Date() })
+    .where(eq(schema.recordings.id, id))
+    .run();
+  return getRecordingRow(id);
 }
 
 export function renameRecording(id: string, title: string): RecordingRow | undefined {
@@ -287,10 +329,28 @@ export function editSegment(
  *
  * 돌려주는 것은 실제로 바뀐 줄 수다 — 하나도 안 바뀌었으면 화면이 그렇다고
  * 말할 수 있어야 한다 (에이전트가 형식을 어겼거나 전부 사람이 고친 것이다).
+ *
+ * ## 표시(`flag`)는 늘 덮어쓴다
+ *
+ * 다른 칸과 달리 `flag` 는 **없으면 지운다.** 그래야 하는 이유가 있다.
+ * 처음 다듬을 때 "이 줄은 못 알아들은 말 같다"(`other-language`) 가 붙었고,
+ * 사람이 무슨 녹음인지 쪽지를 적어 다시 다듬어 이번에는 제대로 다듬어졌다고
+ * 하자. 이때 표시를 안 지우면 **멀쩡해진 줄에 경고가 그대로 남는다.**
+ * 지난번 판단이 이번 결과를 덮는 셈이라 조용히 틀린 화면이 된다.
+ *
+ * 에이전트는 조각 하나에 줄 하나를 내므로, 다듬은 줄에는 늘 이 갈래가
+ * 닿는다 — 표시가 안 온 줄은 "이번에는 표시할 것이 없다" 는 뜻이다.
+ *
+ * ## 사람이 고친 줄에는 표시도 안 붙인다
+ *
+ * 표시는 사람의 글이 아니라 기계의 판단이니 얹어도 될 것 같지만, 사람이
+ * 고친 줄은 대개 **이상해서 고친 줄**이다. 거기에 "못 알아들은 것 같다" 가
+ * 뒤늦게 붙으면 이미 고쳐 놓은 글에 경고만 달린다. 규칙은 하나여야 한다 —
+ * 사람이 손댄 줄은 다듬기가 건드리지 않는다.
  */
 export function applyPolish(
   recordingId: string,
-  items: { i: number; text?: string; speaker?: string | null }[],
+  items: { i: number; text?: string; speaker?: string | null; flag?: SegmentFlag | null }[],
 ): number {
   let changed = 0;
   const now = new Date();
@@ -299,8 +359,14 @@ export function applyPolish(
       const set: Record<string, unknown> = { updatedAt: now };
       if (item.text !== undefined) set.text = item.text;
       if (item.speaker !== undefined) set.speaker = item.speaker;
-      if (Object.keys(set).length === 1) continue;
+      // 위 설명대로 늘 쓴다. 안 온 것은 "표시 없음" 이다.
+      set.flag = item.flag ?? null;
 
+      /*
+       * 예전에는 여기 "바꿀 것이 없으면 건너뛴다" 가 있었다. 지금은 없다 —
+       * `flag` 를 늘 쓰므로 빈 UPDATE 가 나올 수 없고, 아무것도 안 든 항목은
+       * 애초에 여기까지 오지 않는다 (`agent.ts` 의 `readItems` 가 버린다).
+       */
       const r = tx
         .update(schema.segments)
         .set(set)

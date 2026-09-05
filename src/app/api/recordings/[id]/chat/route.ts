@@ -1,8 +1,15 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
 
-import { CHAT_CONTEXT_CHARS, chatContext } from "@/lib/agent";
+import {
+  CHAT_CONTEXT_CHARS,
+  agentModelBrief,
+  chatContext,
+  chatKey,
+  spendChatContext,
+} from "@/lib/agent";
 import { getRecordingRow } from "@/lib/recording-server";
+import { SessionContextFullError, toSessionDTO } from "@/lib/session-server";
 
 /**
  * 녹음 하나를 두고 나누는 대화 — BentoAgent 로 가는 프록시.
@@ -11,11 +18,27 @@ import { getRecordingRow } from "@/lib/recording-server";
  * 이 앱에 이미 있는 로그인을 그대로 경계로 쓰고 싶다. 미들웨어가 이 경로를
  * 지키므로 로그인하지 않으면 여기까지 오지 못한다.
  *
+ * ## 대화는 **세션마다** 이어진다 (녹음마다가 아니라)
+ *
+ * 열쇠는 `sessionId` 칸으로 보낸다 (`chatKey`). 저쪽은 그 이름으로 claude
+ * 세션을 잡으므로, 같은 세션의 두 녹음을 오가며 물어도 한 대화다. 그것이
+ * "한 전사문은 한 세션에서 처리된다" 의 절반이다.
+ *
+ * **`recordingId` 칸에는 진짜 녹음 번호를 보낸다.** 한때 여기에도 세션 열쇠를
+ * 실었다 — 저쪽이 `sessionId` 를 안 볼 때 그 칸이 유일한 열쇠였기 때문이다.
+ * 이제는 보므로 되돌렸다. 되돌려야 하는 이유가 있다: 저쪽은 이 칸으로
+ * 프롬프트 앞머리의 "지금 다루는 녹음" 을 적고, 세션에 붙은 녹음 수를 세고
+ * (상한 20건), 화면 기록의 `about` 에 남긴다. 세션 열쇠를 넣으면 그 셋이
+ * 전부 "세션 하나 = 녹음 하나" 로 보여 상한이 영영 안 걸리고, 지난 대화가
+ * 어느 회차 얘기였는지 가릴 수 없게 된다.
+ *
+ * 세션이 없는 녹음은 예전 그대로 녹음 id 가 열쇠다 (`chatKey` 가 그렇게
+ * 준다). 그래야 세션이 생기기 전에 쌓인 대화 기록이 고아가 되지 않는다.
+ *
  * ## 요약·다듬기와 다른 길이다
  *
- * 저 둘은 한 번 부르고 끝나는 일회성 호출이다. 대화는 녹음마다 세션이
- * 이어진다 (`recordingId` 가 늘 함께 간다) — 다른 녹음 이야기와 Discord
- * 대화가 한 자루에 섞이면 "이 녹음에 대해" 라는 말이 뜻을 잃는다.
+ * 요약은 도구도 세션도 없는 좁은 문(`/task`)으로 간다. 다듬기는 `/voice/polish`
+ * 로 가고, 저쪽이 `sessionId` 를 보기 시작하면 이 대화와 같은 자루에서 돈다.
  *
  * **셋 다 도구가 없다** (BentoAgent 쪽 `tools: []`). 재료가 남이 만든 소리를
  * 받아 적은 글이라, 도구가 달린 세션에 넣으면 그 글이 곧 도구 호출이 될 수
@@ -138,8 +161,12 @@ export async function GET(req: Request, { params }: { params: Promise<{ id: stri
   const ctl = new AbortController();
   const timer = setTimeout(() => ctl.abort(), 5000);
   try {
+    /*
+     * 기록도 **같은 열쇠로** 묻는다 (`sessionId`). 보내는 곳과 읽는 곳이 다른
+     * 열쇠를 쓰면 방금 한 말이 창을 다시 열었을 때 안 보인다.
+     */
     const res = await fetch(
-      join(AGENT_URL!, `/voice/history?recordingId=${encodeURIComponent(id)}`),
+      join(AGENT_URL!, `/voice/history?sessionId=${encodeURIComponent(chatKey(id))}`),
       { headers: { authorization: `Bearer ${AGENT_TOKEN}` }, signal: ctl.signal },
     );
     const text = await res.text();
@@ -208,13 +235,61 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
     );
   }
 
-  return relay("/voice", { method: "POST", body: { recordingId: id, message, context } });
+  /*
+   * 세션 맥락을 **보내기 전에** 적어 둔다.
+   *
+   * 전사문을 매 턴 다시 싣기 때문에(저쪽에 도구가 없어서) 세션 기록은 한
+   * 마디마다 전사문 하나만큼 길어진다. 녹음이 쌓이는 것보다 이쪽이 빨리
+   * 자라는 일도 흔하다. 상한에 닿으면 **자르지 않고 거절한다** — 잘라 보내면
+   * 에이전트가 앞부분을 잃은 줄 모른 채 "그런 얘기는 없습니다" 라고 답한다.
+   *
+   * 보내고 나서 세면 늦다. 그때는 이미 저쪽 세션에 들어간 뒤다.
+   */
+  try {
+    spendChatContext(id, context.length + message.length);
+  } catch (e) {
+    if (e instanceof SessionContextFullError) {
+      return NextResponse.json(
+        { error: e.message, code: "session-context-full", session: toSessionDTO(e.session) },
+        { status: 409 },
+      );
+    }
+    throw e;
+  }
+
+  return relay("/voice", {
+    method: "POST",
+    body: {
+      /** 진짜 녹음 번호. 저쪽이 앞머리에 적고, 세션의 녹음 수를 이걸로 센다. */
+      recordingId: id,
+      /** 대화가 이어질 자루. 같은 세션의 다듬기도 같은 열쇠로 돈다. */
+      sessionId: chatKey(id),
+      /**
+       * 이 전사문을 만든 기계의 서술. **다듬기와 같은 것을 보낸다.**
+       *
+       * 둘이 한 세션에서 도는데 한쪽만 기계의 성질을 알면, 같은 자루 안에서
+       * 앞뒤가 안 맞는 말을 하게 된다 — 다듬기는 "이 기계는 한국어를 모른다"
+       * 로 표시해 두고 대화는 그 줄의 뜻을 짐작해 답하는 식으로.
+       */
+      model: agentModelBrief(),
+      message,
+      context,
+    },
+  });
 }
 
-/** 새 대화 — **이 녹음 것만** 지운다. */
+/**
+ * 새 대화 — **이 세션 것만** 지운다.
+ *
+ * 세션이 붙은 녹음이면 그 세션의 대화가 통째로 지워진다. 같은 세션의 다른
+ * 녹음에서 나눈 말도 함께 사라진다는 뜻이다 — 그게 맞다. 하나의 자루이므로
+ * 반만 지울 방법이 없고, 반만 지운 척하는 것이 더 나쁘다.
+ *
+ * 전사문·다듬은 결과·요약은 우리 DB 에 있으므로 하나도 안 잃는다.
+ */
 export async function DELETE(_req: Request, { params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
   const agent = readiness();
   if (!agent.ready) return NextResponse.json({ error: agent.reason, agent }, { status: 503 });
-  return relay("/voice/reset", { method: "POST", body: { recordingId: id } });
+  return relay("/voice/reset", { method: "POST", body: { sessionId: chatKey(id) } });
 }

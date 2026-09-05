@@ -7,9 +7,9 @@ import { pipeline } from "node:stream/promises";
 
 import { eq, inArray } from "drizzle-orm";
 
-import { agentReady, drivePolishInBackground, startPolish } from "./agent";
+import { agentReady, queuePolish } from "./agent";
 import { db, schema } from "./db";
-import { asrThreads, env, modelPaths } from "./env";
+import { asrModel, asrThreads, env, modelPaths } from "./env";
 import { openFile } from "./memobento";
 import {
   bumpAttempts,
@@ -349,6 +349,19 @@ function runWorker(
         "--vad", resolve(modelPaths.vad),
         "--threads", String(asrThreads),
         "--ffmpeg", env.FFMPEG_PATH,
+        /*
+         * 모델의 성질을 **부모가 골라서 넘긴다.**
+         *
+         * 워커가 제 손으로 서술자 표를 다시 읽게 하지 않는다. 환경변수가
+         * 어긋난 날(부모는 새 모델, 워커는 기본값) 둘이 다른 모델로 도는데
+         * 그 어긋남은 아무 데도 안 보인다 — 나오는 것은 그냥 이상한 전사문
+         * 이다. 부모가 고르고 워커는 따르면 그런 갈림길이 없다.
+         *
+         * argv 는 호스트 `ps` 에서 그대로 보인다. 여기 실리는 것은 전부
+         * 공개해도 되는 사실이고 (파일 이름·표본율·VAD 값), 사람이 한 말이나
+         * 열쇠는 한 글자도 없다.
+         */
+        "--spec", JSON.stringify(asrModel.runtime),
       ],
       {
         stdio: ["ignore", "pipe", "pipe"],
@@ -564,15 +577,37 @@ function num(v: unknown): number | null {
 
 /** 이보다 말한 시간이 짧으면 판정하지 않는다. 짧은 소리는 표본이 못 된다. */
 const MIN_SPEECH_TO_JUDGE = 20;
-/** 초당 글자 수가 이 아래면 "알아듣지 못한 것" 으로 본다. */
-const MIN_CHARS_PER_SECOND = 5;
+
+/**
+ * "못 알아들은 것 같다" 는 문장. **서술자에서 만든다.**
+ *
+ * 예전에는 여기에 "parakeet-tdt-0.6b-v3 은 한국어를 못 합니다" 가 박혀
+ * 있었다. 한국어를 하는 모델을 붙이는 날 이 문장이 옛말로 남고, 그러면
+ * 멀쩡한 한국어 녹음에 "한국어를 못 합니다" 가 뜬다 — 사람은 파일이 잘못된
+ * 줄 알고 같은 것을 다시 올린다. 원래 이 안내가 막으려던 바로 그 일이다.
+ */
+function unheardText(): string {
+  const speaksKorean = asrModel.languages.includes("ko");
+  const head =
+    "소리는 들어 있는데 알아들은 글자가 거의 없습니다. " +
+    `이 앱의 전사 모델(${asrModel.name})은 ${asrModel.languagesLabel}을 알아듣습니다`;
+  return speaksKorean
+    ? `${head}. 그 목록에 없는 말이었다면 이것이 이유입니다. 파일이 잘못된 것이 아닙니다.`
+    : `${head} — **한국어는 목록에 없습니다.** 한국어를 넣으면 오류 대신 빈 글이나 ` +
+        "엉뚱한 로마자가 나옵니다. 한국어 녹음이라면 이것이 이유입니다. " +
+        "파일이 잘못된 것이 아닙니다.";
+}
 
 function judgeNotice(stats: RunStats): RecordingNoticeDTO | null {
-  const KOREAN_TEXT =
-    "소리는 들어 있는데 알아들은 글자가 거의 없습니다. " +
-    "이 앱의 전사 모델(parakeet-tdt-0.6b-v3)은 **한국어를 알아듣지 못합니다** — " +
-    "어휘에 한글이 하나도 없어서, 한국어를 넣으면 오류 대신 빈 글이나 엉뚱한 로마자가 나옵니다. " +
-    "한국어 녹음이라면 이것이 이유입니다. 파일이 잘못된 것이 아닙니다.";
+  /*
+   * 문턱도 모델의 성질이다.
+   *
+   * parakeet 은 영어를 초당 20자쯤 내놓아서 5가 넉넉한 문턱이지만, 한국어를
+   * 하는 모델에 같은 값을 쓰면 멀쩡한 한국어 전사(초당 5~7자)가 통째로
+   * "못 알아들었다" 로 잡힌다. 그래서 서술자에서 가져온다.
+   */
+  const minCharsPerSecond = asrModel.minCharsPerSecond;
+  const unheard = unheardText();
 
   if (stats.duration !== null && stats.duration > 5 && stats.segments === 0) {
     return {
@@ -580,7 +615,7 @@ function judgeNotice(stats: RunStats): RecordingNoticeDTO | null {
       text:
         "말을 하나도 찾지 못했습니다. 소리가 너무 작거나, 말이 아닌 소리(음악·잡음)이거나, " +
         "이 모델이 모르는 말일 수 있습니다. " +
-        KOREAN_TEXT,
+        unheard,
     };
   }
 
@@ -588,8 +623,15 @@ function judgeNotice(stats: RunStats): RecordingNoticeDTO | null {
 
   const emptyRatio = stats.empty / stats.segments;
   const density = stats.chars / stats.speech;
-  if (emptyRatio > 0.4 || density < MIN_CHARS_PER_SECOND) {
-    return { kind: "maybe-korean", text: KOREAN_TEXT };
+  if (emptyRatio > 0.4 || density < minCharsPerSecond) {
+    /*
+     * 갈래 이름은 `maybe-korean` 그대로 둔다. 뜻은 이제 "이 모델이 모르는
+     * 말인 것 같다" 로 넓어졌지만, 이름을 바꾸면 화면이 아는 두 갈래
+     * (`maybe-korean`·`mostly-empty`) 중 어느 쪽도 아닌 값이 흘러가고 그때
+     * 안내가 통째로 안 뜬다 — 이 앱에서 그것이 제일 나쁜 결과다.
+     * 문장은 위에서 서술자로 만들므로 모델을 갈아도 옛말이 남지 않는다.
+     */
+    return { kind: "maybe-korean", text: unheard };
   }
   return null;
 }
@@ -613,14 +655,19 @@ async function maybeAutoPolish(recordingId: string): Promise<void> {
   // 설정 행이 아직 없으면 기본값(켬)이다.
   if (cfg && cfg.autoPolish !== 1) return;
 
+  /*
+   * **여기가 같은 세션의 다듬기가 겹치는 주된 자리다.**
+   *
+   * 회의 녹음 셋을 한 세션에 나란히 올리면 전사가 끝나는 대로 각자 여기까지
+   * 와서 셋이 동시에 다듬기를 시작한다. 사람이 버튼을 연달아 누르는 것과
+   * 달리 이건 저절로 일어나므로 막을 사람이 없다. `queuePolish` 가 세션마다
+   * 줄을 세운다 (`agent.ts`).
+   *
+   * 상태를 여기서 옮기지 않는다 — 줄에 서는 것과 시작하는 것이 다른 때라,
+   * 그 두 자리를 아는 쪽이 상태도 옮겨야 한다.
+   */
   try {
-    const jobId = await startPolish(recordingId, null);
-    setRecordingState(
-      recordingId,
-      { state: "polishing", polishJobId: jobId, polishError: null, polishStartedAt: new Date() },
-      ["done"],
-    );
-    drivePolishInBackground(recordingId);
+    await queuePolish(recordingId, null);
   } catch (e) {
     setRecordingState(recordingId, {
       polishError: e instanceof Error ? e.message : String(e),
