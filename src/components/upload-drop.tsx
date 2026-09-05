@@ -21,15 +21,30 @@ import { cn } from "@/lib/utils";
  * 따라 빈 MIME 로 들어온다 — 그때 확장자가 유일한 단서다.
  */
 
-/** `<input accept>` 에 들어가는 값. 고르기 창의 기본 필터일 뿐 강제는 아니다. */
-const ACCEPT = "audio/*,video/*";
-
 const MEDIA_EXTS = new Set([
   // 소리
   "mp3", "m4a", "m4b", "wav", "flac", "ogg", "oga", "opus", "aac", "wma", "aiff", "aif", "amr", "caf",
   // 영상 — 오디오 트랙만 뽑아 쓴다
   "mp4", "m4v", "mov", "mkv", "webm", "avi", "wmv", "flv", "ts", "mts", "m2ts", "mpg", "mpeg", "3gp",
 ]);
+
+/**
+ * `<input accept>` 에 들어가는 값.
+ *
+ * **확장자를 하나하나 적는다.** 예전에는 `"audio/*,video/*"` 뿐이었는데,
+ * 아이폰에서 **파일을 고르는 것 자체가 안 됐다** — iOS 의 파일 앱은 이 필터를
+ * UTI 로 옮겨 맞추면서 맞는 파일까지 흐리게 만드는 일이 잦다. 확장자를 직접
+ * 적으면 그 자리가 풀린다. 형제 앱들은 처음부터 그렇게 적고 있었고
+ * (`PaperBento` 의 `".pdf,application/pdf"`), 여기만 빠져 있었다.
+ *
+ * 와일드카드도 함께 남긴다 — 데스크톱 브라우저가 고르기 창에 "오디오/비디오"
+ * 라는 갈래 이름을 붙여 주는 것이 그 값이고, 목록에 없는 형식도 그때는 보인다.
+ *
+ * **어차피 강제가 아니다.** 무엇이 골라져 들어오든 아래 `isMedia` 가 다시
+ * 거른다. 이 값은 "보이게 하는" 쪽이지 "막는" 쪽이 아니라서, 넓히는 방향으로
+ * 틀리는 편이 안전하다 — 못 고르는 것보다 골랐다가 걸러지는 편이 낫다.
+ */
+const ACCEPT = ["audio/*", "video/*", ...[...MEDIA_EXTS].map((e) => `.${e}`)].join(",");
 
 export function extOf(name: string): string {
   const dot = name.lastIndexOf(".");
@@ -153,6 +168,29 @@ export function UploadButton({
   label?: string;
 }) {
   const input = useRef<HTMLInputElement | null>(null);
+  /*
+   * 필터 없는 두 번째 입력.
+   *
+   * `accept` 는 "보이게 하는" 값이지 "막는" 값이 아닌데, iOS 의 파일 앱은 그걸
+   * UTI 로 옮겨 맞추면서 **맞는 파일까지 흐리게** 만들 때가 있다. 실제로
+   * 아이폰에서 `.m4a` 를 고르는 것 자체가 안 됐다. 확장자를 하나하나 적어 그
+   * 자리를 풀었지만(위 `ACCEPT`), 기기·판마다 다른 종류의 문제라 **막다른 길이
+   * 다시 생기지 않게** 빠져나갈 문을 하나 둔다.
+   *
+   * 필터가 없어도 안전한 이유: 무엇이 골라져 들어오든 `keepMedia` 가 다시
+   * 거른다. 이 문은 고르는 창을 넓힐 뿐 받는 것을 넓히지 않는다.
+   */
+  const anyInput = useRef<HTMLInputElement | null>(null);
+
+  const take = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const picked = Array.from(e.target.files ?? []);
+    // 같은 파일을 두 번 고를 수 있어야 한다. 값을 비우지 않으면
+    // change 가 다시 터지지 않는다.
+    e.target.value = "";
+    const { kept, dropped } = keepMedia(picked);
+    if (dropped > 0) onReject?.(`소리·영상이 아닌 파일 ${dropped}개는 건너뛰었습니다`);
+    if (kept.length > 0) onFiles(kept);
+  };
 
   return (
     <>
@@ -171,22 +209,20 @@ export function UploadButton({
         <FileVideo className={cn("h-4 w-4", iconClassName)} />
         {label}
       </button>
-      <input
-        ref={input}
-        type="file"
-        accept={ACCEPT}
-        multiple
-        hidden
-        onChange={(e) => {
-          const picked = Array.from(e.target.files ?? []);
-          // 같은 파일을 두 번 고를 수 있어야 한다. 값을 비우지 않으면
-          // change 가 다시 터지지 않는다.
-          e.target.value = "";
-          const { kept, dropped } = keepMedia(picked);
-          if (dropped > 0) onReject?.(`소리·영상이 아닌 파일 ${dropped}개는 건너뛰었습니다`);
-          if (kept.length > 0) onFiles(kept);
+      <button
+        type="button"
+        onClick={(e) => {
+          e.stopPropagation();
+          anyInput.current?.click();
         }}
-      />
+        onPointerDown={(e) => e.stopPropagation()}
+        className="text-[11px] whitespace-nowrap text-(--color-fg-4) underline decoration-dotted underline-offset-2 transition hover:text-(--color-fg-2)"
+      >
+        안 보이면 전체에서
+      </button>
+      <input ref={input} type="file" accept={ACCEPT} multiple hidden onChange={take} />
+      {/* 필터 없음 — 위 주석 참고. 받는 것은 `keepMedia` 가 그대로 거른다. */}
+      <input ref={anyInput} type="file" multiple hidden onChange={take} />
     </>
   );
 }
