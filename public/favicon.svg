@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" width="32" height="32">
+  <!--
+    탭 아이콘. 세 앱이 **같은 뼈대**(둥근 사각형 + 그린 그림)를 쓰고 그림만
+    다르다. 탭이 여럿 떠 있을 때 색이 아니라 모양으로 가려야 하기 때문이다.
+
+    색은 CSS 변수를 쓸 수 없다 — 파비콘은 문서 밖에서 그려져 우리 :root 가
+    닿지 않는다. Forest 라이트의 값을 그대로 옮겨 박는다 (oklch 를 sRGB 로
+    변환한 것).
+      bg     oklch(0.985 0.005 60)  → #fdf9f7
+      border oklch(0.82  0.005 60)  → #c7c3c1
+      accent oklch(0.55 0.18 145)   → #008b1d
+
+    바탕이 밝아서 흰 탭 배경에 묻힌다. 그래서 테두리를 한 줄 두른다.
+
+    그림은 **책등 셋** — 서가에 꽂힌 논문.
+  -->
+  <rect x="0.75" y="0.75" width="30.5" height="30.5" rx="7.5" fill="#fdf9f7" stroke="#c7c3c1" stroke-width="1.5" />
+  <g fill="none" stroke="#008b1d" stroke-width="2.6" stroke-linecap="round">
+    <path d="M9.5 9v14" />
+    <path d="M15 9v14" />
+    <path d="M20.5 9.6l4 13.4" />
+  </g>
+</svg>
