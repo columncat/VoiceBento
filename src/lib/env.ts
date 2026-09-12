@@ -12,6 +12,7 @@
 import { z } from "zod";
 
 import { DEFAULT_MODEL_ID, getModel } from "./asr-models";
+import { DEFAULT_DIAR_MODEL_ID, getDiarModel } from "./diar-models";
 
 const envSchema = z.object({
   DATABASE_PATH: z.string().default("./data/voicebento.db"),
@@ -73,6 +74,46 @@ const envSchema = z.object({
    * 갈라 둔 이유는 위와 같다 — 스택 배포에서 VAD 는 모델 폴더 **밖에** 있다.
    */
   VAD_MODEL_PATH: z.string().optional(),
+
+  /**
+   * 화자 분리 모델(분할 + 임베딩) 두 개가 있는 자리. 합 34.3MB.
+   *
+   * **`ASR_MODEL_DIR` 에서 짐작하지 않는다.** 스택 배포에서 전사 모델은
+   * `/models/sherpa-onnx-nemo-parakeet-…` 안에 있고 VAD 는 한 칸 위에 있다.
+   * 분리 모델이 어느 칸에 앉을지는 `bootstrap.sh` 가 정하는 것이지 여기서
+   * `..` 를 붙여 맞힐 일이 아니다 — 맞히려 들면, 스택이 아직 분리 모델을
+   * 모르는 배포에서 **읽기 전용 자리에 쓰다 EROFS 로 죽는다.**
+   *
+   * 그래서 이 값을 비워 두면 `MODEL_DIR`(도커에서 /app/data/models, 우리가
+   * 쓸 수 있는 볼륨)에 받는다. 그 편이 좋은 성질을 하나 준다 — **이미 돌고
+   * 있는 스택이 설정 한 줄 안 바꾸고도 화자 분리를 갖게 된다.** 34.3MB 라
+   * 볼륨에 부담도 아니다 (전사 모델이 671MB 다).
+   *
+   * 값이 있으면 `fetch-model.mjs` 는 내려받지 않고 **있는지만 본다.**
+   */
+  DIAR_MODEL_DIR: z.string().optional(),
+
+  /**
+   * 어느 화자 분리 모델을 쓰는가. 서술자의 id (`scripts/diar-models.json`).
+   *
+   * 비우면 표의 기본값(pyannote-segmentation-3.0 + CAM++)이다. `ASR_MODEL_ID`
+   * 와 같은 규율으로 **모르는 id 를 적으면 앱이 뜨지 않는다.**
+   *
+   * 갈아 끼울 것이 실질적으로 임베딩뿐인 까닭은 `diar-models.ts` 첫머리에
+   * 적혀 있다. 한 가지만 여기 옮겨 적어 둔다: **한국어 전사 모델로 바꾸는
+   * 날 이 값은 손댈 것이 없다.** 임베딩은 낱말이 아니라 목소리의 성질을
+   * 재므로 말과 무관하다.
+   */
+  DIAR_MODEL_ID: z.string().trim().optional(),
+
+  /**
+   * 분리에 쓸 스레드 수. 비우면 서술자의 기본값(4).
+   *
+   * 이름이 하나뿐인 것은 `ASR_THREADS`/`ASR_NUM_THREADS` 와 달리 이 값을
+   * 적어 둔 설치 마법사가 아직 없기 때문이다. 새로 만드는 이름이니 둘로
+   * 나눌 이유가 없다.
+   */
+  DIAR_THREADS: z.coerce.number().int().min(1).max(16).optional(),
 
   /**
    * 업로드 1건당 최대 크기 (MB). 조각 전송이라 메모리와 무관하게 키울 수 있다.
@@ -274,3 +315,50 @@ export const asrModel = getModel(env.ASR_MODEL_ID || DEFAULT_MODEL_ID);
  */
 export const asrThreads =
   env.ASR_THREADS ?? env.ASR_NUM_THREADS ?? asrModel.runtime.defaultThreads;
+
+/**
+ * 지금 쓰는 화자 분리 모델의 서술자. **분리 모델의 성질을 묻는 곳은 여기 하나다.**
+ *
+ * 모듈 껍데기에서 한 번 읽는다 — 서술자의 불변식 검사(`assertDiarModel`)가
+ * 그때 돈다. 라이선스 허용 목록, `windowShiftRatio` 상한, `clusterMargin`
+ * 하한, 길이 상한과 메모리 예산의 짝이 거기서 걸린다. 어긋나 있으면 앱이
+ * 안 뜨고, 그 편이 분리가 조용히 틀린 이름을 붙이는 것보다 낫다.
+ *
+ * **모델 파일이 없는 것은 여기서 안 본다.** 그건 서술자의 잘못이 아니고,
+ * 무엇보다 전사문이 화자 분리보다 먼저다 — 파일이 없으면 화자 구분만 못 하고
+ * 전사는 그대로 돈다.
+ */
+export const diarModel = getDiarModel(env.DIAR_MODEL_ID || DEFAULT_DIAR_MODEL_ID);
+
+/**
+ * 화자 분리 모델이 실제로 어디 있는가. **위 `modelPaths` 와 갈라 둔다.**
+ *
+ * 갈라 두는 근거는 `DIAR_MODEL_DIR` 설명에 있다 — 요는 `ASR_MODEL_DIR` 에서
+ * 분리 모델 자리를 짐작하지 않는다는 것이다.
+ *
+ * `seg`·`emb` 는 **모델 서술자가 정한 이름**으로 이은 것이다. 부르는 쪽이
+ * 파일 이름을 다시 적으면, 모델을 갈아 끼울 때 서술자만 고치고 그 자리는
+ * 옛 이름을 계속 가리킨다. 그러면 분리는 "파일이 없습니다" 로 죽는데 화면에는
+ * 내려받기가 실패한 것처럼 보인다.
+ *
+ * `managed` 는 **이 자리에 우리가 내려받아도 되는가**이다 (스택이 물려 준
+ * 자리는 읽기 전용이다).
+ */
+export const diarPaths = (() => {
+  const dir = (env.DIAR_MODEL_DIR?.trim() || env.MODEL_DIR).replace(/[/\\]$/, "");
+  const managed = !env.DIAR_MODEL_DIR?.trim();
+  return {
+    dir,
+    managed,
+    seg: `${dir}/${diarModel.segmentation.name}`,
+    emb: `${dir}/${diarModel.embedding.name}`,
+  };
+})();
+
+/**
+ * 분리에 쓸 스레드 수. 사람이 적은 값 → **서술자의 기본값.**
+ *
+ * `asrThreads` 와 같은 결이다 — 적정 스레드 수는 기계가 아니라 모델의
+ * 성질이라 마지막 자리를 서술자에 둔다.
+ */
+export const diarThreads = env.DIAR_THREADS ?? diarModel.runtime.defaultThreads;

@@ -24,8 +24,20 @@ import { SessionContextFullError, sessionOfRecording, toSessionDTO } from "@/lib
  * 전사문 다듬기 — 에이전트에게 맡긴다.
  *
  * 전사문 **전체를 한 번에** 넘긴다. 조각마다 따로 물으면 앞뒤를 모르는 채로
- * 다듬게 되고, 화자 추정은 아예 못 한다 — 누가 말했는지는 대사의 흐름에서만
- * 나온다 (이 앱은 화자 분리 모델을 쓰지 않는다. 에이전트가 대사에서 추정한다).
+ * 다듬게 된다.
+ *
+ * ## 화자는 **줄이 아니라 무리**에 붙는다
+ *
+ * 누가 언제 말했는지는 소리가 정한다 (`lib/diarize-assign.ts`). 에이전트가
+ * 정하는 것은 **군집 → 이름 표 하나**이고, 그러려면 대사 전체를 봐야 한다 —
+ * 이름은 "고맙습니다, 지훈 씨" 같은 자리에서만 나오는데 그 자리가 어느
+ * 조각인지는 미리 알 수 없다.
+ *
+ * 응답 모양에는 **줄마다의 화자를 넣을 자리가 아예 없다** (`agent.ts` 의
+ * `readItems`). 안내문으로만 막으면 코드로는 열려 있고, 열려 있는 문은
+ * 언젠가 쓰인다. 음향이 말한 시간 순서만으로 이름을 맞히면 64.9%(신탁
+ * 70.6%)이고 개별 파일에서 20%까지 무너지므로 **이름은 에이전트가 정하는
+ * 것이 맞다.** 다만 정하는 단위가 줄이 아니어야 한다.
  *
  * 붙들지 않는다. 202 와 작업 번호만 주고, 화면이 `GET` 으로 물어본다 —
  * 앞의 Cloudflare 터널이 100초에서 끊는다.
@@ -90,6 +102,21 @@ export async function POST(
   if (row.state === "queued" || row.state === "extracting" || row.state === "transcribing") {
     return NextResponse.json(
       { error: "아직 옮겨 적는 중입니다. 끝나면 저절로 다듬습니다.", recording: toRecordingDTO(row) },
+      { status: 409 },
+    );
+  }
+  /*
+   * 화자를 나누는 중에도 거절한다. 위와 같은 까닭이다 — 상태를 `polishing`
+   * 으로 옮기면 분리가 끝나며 상태를 되돌릴 때(`setRecordingState(..., "done")`)
+   * 다듬기가 통째로 덮여 사라진다. 그리고 재료가 아직 다 없다: 다듬기는
+   * 화자 이름이 붙은 전사문을 읽어야 군집에 이름을 달 수 있다.
+   */
+  if (row.state === "diarizing") {
+    return NextResponse.json(
+      {
+        error: "누가 말했는지 가르는 중입니다. 끝나면 저절로 다듬습니다.",
+        recording: toRecordingDTO(row),
+      },
       { status: 409 },
     );
   }

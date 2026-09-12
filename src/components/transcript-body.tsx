@@ -1,16 +1,16 @@
 "use client";
 
-import { Crosshair, TriangleAlert } from "lucide-react";
+import { Crosshair, Gauge, TriangleAlert, UserRoundSearch, Waves } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState, type RefObject } from "react";
 
-import type { RecordingNoticeDTO, SegmentDTO } from "@/lib/types";
+import type { DiarizationDTO, RecordingNoticeDTO, SegmentDTO } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
 import { EmptyTranscriptNotice, TimestampCapabilityLine } from "./language-notice";
 import type { ModelCapability } from "./model-capability";
 import { isFlagged } from "./segment-flag";
 import { SegmentRow } from "./segment-row";
-import { SpeakerLegend, useSpeakerStyles } from "./speaker";
+import { SpeakerLegend, dominantSpeakerSource, type ClusterNamer, type SpeakerStyle } from "./speaker";
 
 /**
  * 전사문 본문. 화면 가운데를 차지하는 것.
@@ -58,6 +58,10 @@ export function TranscriptBody({
   jumpRef,
   notice,
   cap,
+  diarization,
+  namer,
+  speakers,
+  unsureSilhouette,
   showEmptyNotice,
   onSave,
   className,
@@ -73,6 +77,24 @@ export function TranscriptBody({
   notice: RecordingNoticeDTO | null;
   /** 모델이 무엇을 할 수 있나. 낱말 클릭 여부가 여기서 갈린다. */
   cap: ModelCapability;
+  /** 이 녹음의 화자 분리 한 판. 안 했으면 null. 파일 단위 경고가 여기서 나온다. */
+  diarization: DiarizationDTO | null;
+  /**
+   * 군집 번호 → 이름, 그리고 이름 → 색·선 모양.
+   *
+   * **위(`transcript-view`)에서 만들어 내려온다.** 여기서 만들면 화자 패널이
+   * 제 손으로 한 벌 더 만들게 되고, 그러면 같은 사람이 본문과 패널에서 다른
+   * 색을 갖는다 — 색은 이 화면에서 사람을 가르는 주된 표시라 그 어긋남이
+   * 곧바로 보인다.
+   */
+  namer: ClusterNamer;
+  speakers: Map<string, SpeakerStyle>;
+  /**
+   * 줄 단위 "덜 확실하다" 문턱 (`DiarNoticeDTO.unsureSilhouette`). 안내를 못 받았거나
+   * 이 모델의 실력을 재 두지 않았으면 null — 그때는 아무 줄에도 표시하지 않는다.
+   * 에이전트의 `?` 와 같은 값이다.
+   */
+  unsureSilhouette: number | null;
   /** 전사가 끝났는데 옮겨진 말이 거의 없는가. */
   showEmptyNotice: boolean;
   onSave: (id: string, patch: { text?: string; speaker?: string | null }) => Promise<void>;
@@ -83,8 +105,9 @@ export function TranscriptBody({
   const [activeIndex, setActiveIndex] = useState(-1);
   const [activeVisible, setActiveVisible] = useState(true);
 
-  const speakers = useSpeakerStyles(segments);
   const speakerListId = "voice-speaker-names";
+  /** 이름이 주로 어디서 왔나. 아래 범례의 문구가 여기서 갈린다. */
+  const speakerSource = useMemo(() => dominantSpeakerSource(segments), [segments]);
 
   /**
    * 조각 시작 시각만 뽑아 둔다. 이분 탐색에 쓴다.
@@ -279,9 +302,75 @@ export function TranscriptBody({
 
   return (
     <div className={cn("flex min-h-0 flex-col gap-2", className)}>
+      {diarization?.lowConfidence && (
+        /*
+          **이 녹음은 통째로 의심하라.**
+
+          문턱은 서버가 걸어 준다 (`DiarizationDTO.lowConfidence`) — 이 눈금은
+          임베딩 모델마다 다른 값이라 화면이 손으로 든 숫자를 쓰면 모델을
+          갈아 끼우는 날 조용히 옛말이 된다.
+
+          이 경고는 **파일 단위라서 산다.** 분리 구간 실루엣의 중앙값은 그
+          파일의 화자 정확도와 Spearman 0.72~0.97 로 붙어 다닌다. 줄 단위로
+          같은 것을 말하려던 길은 죽었고(합성에서 정밀도 100% 였던 것이 진짜
+          회의에서 50%), 그래서 줄에는 "덜 확실하다" 까지만 적는다.
+
+          원래 쓰려던 "나온 무리 수 < 요청한 수" 는 쓰지 않는다 — AMI 9편에서
+          한 번도 안 울렸다. 안 울리는 경고는 없는 경고다.
+        */
+        <div className="flex shrink-0 flex-wrap items-center gap-x-2 gap-y-1 rounded-lg bg-(--color-warn)/10 px-3 py-1.5 text-[11px] break-keep text-(--color-warn) ring-1 ring-(--color-warn)/25">
+          <Waves className="h-3.5 w-3.5 shrink-0" />
+          <span className="min-w-0">
+            이 녹음은 화자 나누기가 특히 불안합니다 — 목소리들이 서로 잘 안 갈렸습니다.
+            아래 이름들은 자리가 바뀌어 붙어 있을 수 있으니, 누가 말했는지가 중요한 대목은 소리를
+            들어 확인해 주세요.
+          </span>
+        </div>
+      )}
+
+      {diarization?.silhouetteMissing && (
+        /*
+          **재지 못했다.** 위 경고(`lowConfidence`)와 뜻이 다르다.
+
+          실루엣이 없는 판(긴 녹음이라 접었다 · 재다가 엔진이 죽었다 · 값을 안
+          냈다)에서는 파일 경고도 줄마다의 "덜 또렷" 도 **붙을 수가 없다.** 이 줄이
+          없으면 그 모습이 "잘 갈린 녹음" 과 똑같이 보인다. 그래서 경고 색을 쓰지
+          않고(틀렸다는 말이 아니므로) 사실과 이유만 적는다.
+        */
+        <div className="flex shrink-0 flex-wrap items-center gap-x-2 gap-y-1 rounded-lg bg-(--color-bg-2) px-3 py-1.5 text-[11px] break-keep text-(--color-fg-3) ring-1 ring-(--color-border-soft)">
+          <Gauge className="h-3.5 w-3.5 shrink-0 text-(--color-fg-4)" />
+          <span className="min-w-0">
+            이 녹음은 화자 신뢰도를 재지 못했습니다 — {diarization.silhouetteMissing} 그래서 줄마다의
+            “덜 또렷” 표시와 녹음 전체의 경고가 붙지 않습니다. 표시가 없다고 확실하다는 뜻은
+            아닙니다.
+          </span>
+        </div>
+      )}
+
+      {diarization && diarization.recheckNames.length > 0 && (
+        /*
+          **다시 확인해 주세요.** 화자를 다시 나누면서 사람이 붙인 이름을 어느
+          목소리에 줄지 뚜렷하지 않아 옮기지 않은 것이다 (`saveDiarization`).
+
+          조용히 사라지면 사람은 저장한 이름이 왜 없어졌는지 모른다. 그리고
+          패널을 열어야만 보이면 아무도 안 연다 — 전사문은 멀쩡히 읽히니까.
+          그래서 본문 위에 띄운다. 패널에서 이름 표를 저장하면 사라진다.
+        */
+        <div className="flex shrink-0 flex-wrap items-center gap-x-2 gap-y-1 rounded-lg bg-(--color-warn)/10 px-3 py-1.5 text-[11px] break-keep text-(--color-warn) ring-1 ring-(--color-warn)/25">
+          <UserRoundSearch className="h-3.5 w-3.5 shrink-0" />
+          <span className="min-w-0">
+            다시 확인해 주세요 — 화자를 다시 나누면서{" "}
+            <b className="font-medium">{diarization.recheckNames.join(", ")}</b> 을(를) 어느 목소리에
+            붙일지 뚜렷하지 않아 옮기지 않았습니다. 위 “화자” 에서 이름을 다시 붙이고 저장하면 이
+            안내가 사라집니다.
+          </span>
+        </div>
+      )}
+
       {speakers.size > 0 && (
         <SpeakerLegend
           styles={speakers}
+          source={speakerSource}
           className="shrink-0 rounded-lg bg-(--color-bg-2) px-3 py-2 ring-1 ring-(--color-border-soft)"
         />
       )}
@@ -352,6 +441,9 @@ export function TranscriptBody({
                   time={i === activeIndex ? time : null}
                   speakerListId={speakerListId}
                   wordClick={cap.wordClick}
+                  namer={namer}
+                  styles={speakers}
+                  unsureAt={unsureSilhouette}
                   onSeek={onSeek}
                   onSave={onSave}
                 />

@@ -19,6 +19,11 @@ import { enqueue } from "@/lib/transcribe";
  * **사람이 고친 줄도 함께 사라진다.** 그래서 화면이 먼저 물어야 한다 —
  * 여기까지 온 요청은 이미 마음먹은 것으로 본다.
  *
+ * **목소리에 붙인 이름은 안 사라진다** (`clearSegments` 가 분리 행을 남긴다). 날
+ * 구간은 소리에 대한 것이라 다시 전사해도 참이다. 새 전사가 끝나 다시 나누면 이름이
+ * 목소리를 따라 옮겨지고(못 옮긴 사람 이름은 "다시 확인"), 못 나누면 남겨 둔 구간으로
+ * 새 줄에 다시 붙는다. 화면의 확인창도 이 둘을 갈라 적는다.
+ *
  * 202 만 돌려준다. 60분짜리가 5분 46초 걸린다 (실측 RTF 0.096).
  */
 
@@ -40,7 +45,13 @@ export async function POST(
       { status: 409 },
     );
   }
-  if (row.state === "extracting" || row.state === "transcribing" || row.state === "queued") {
+  if (
+    row.state === "extracting" ||
+    row.state === "transcribing" ||
+    row.state === "queued" ||
+    // 화자를 나누는 중이면 WAV 와 워커가 아직 살아 있다. 그 위에 새 판을 얹지 않는다.
+    row.state === "diarizing"
+  ) {
     return NextResponse.json(
       { error: "이미 전사하고 있습니다", recording: toRecordingDTO(row) },
       { status: 409 },

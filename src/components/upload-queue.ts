@@ -52,6 +52,13 @@ export interface UploadItem {
   sessionId: string | null;
   /** 전송 칸에 적을 세션 이름. 보여 주기 위한 것뿐이다. */
   sessionName: string | null;
+  /**
+   * 말한 사람 목록. 비어 있으면 자동 분리를 건너뛴다.
+   *
+   * 세션과 같은 까닭으로 **줄에 서기 전에** 정해진다. 전사가 끝나면 곧바로
+   * 자동 분리가 도는데, 그때 목록이 없으면 건너뛰고 사람이 나중에 다시 눌러야 한다.
+   */
+  roster: string[];
   status: UploadStatus;
   /** 올라간 바이트 수. */
   sent: number;
@@ -120,6 +127,7 @@ export function enqueueUploads(
   files: File[],
   sessionId: string | null,
   sessionName: string | null = null,
+  roster: string[] = [],
 ): void {
   for (const file of files) {
     const item: UploadItem = {
@@ -128,6 +136,7 @@ export function enqueueUploads(
       size: file.size,
       sessionId,
       sessionName,
+      roster: [...roster],
       status: "queued",
       sent: 0,
       startedAt: Date.now(),
@@ -217,7 +226,13 @@ async function uploadOne(item: UploadItem, file: File): Promise<void> {
        * 녹음까지 만들든) 세션이 빠지지 않게 하려는 것이다. 한쪽에만 보내면
        * 서버가 다른 쪽을 골랐을 때 세션 없는 녹음이 조용히 만들어진다.
        */
-      body: JSON.stringify({ uploadId, title, sessionId: item.sessionId }),
+      body: JSON.stringify({
+        uploadId,
+        title,
+        sessionId: item.sessionId,
+        // 목록은 적었을 때만 싣는다. 서버는 이 칸이 없으면 "안 적었다" 로 읽는다.
+        ...(item.roster.length ? { roster: item.roster } : {}),
+      }),
     });
     const fin = await readJson<{ fileId?: string; recording?: RecordingWithSession }>(finRes);
 
@@ -226,7 +241,12 @@ async function uploadOne(item: UploadItem, file: File): Promise<void> {
       (fin.fileId
         ? // `SessionPick` 은 둘 중 하나만 준다. 세션이 없으면 아무것도 안 실어 보낸다 —
           // `sessionId: null` 을 보내면 서버가 "고른 것" 과 "안 고른 것" 을 못 가른다.
-          await api.create(fin.fileId, title, item.sessionId ? { sessionId: item.sessionId } : {})
+          await api.create(
+            fin.fileId,
+            title,
+            item.sessionId ? { sessionId: item.sessionId } : {},
+            item.roster,
+          )
         : null);
     if (!recording) throw new Error("올린 파일을 확인하지 못했습니다");
 

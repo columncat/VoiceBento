@@ -2,7 +2,14 @@ import { NextResponse } from "next/server";
 import { z } from "zod";
 
 import { logAgent } from "@/lib/agent-log";
-import { editSegment, getRecordingRow, getSegmentRow, toSegmentDTO } from "@/lib/recording-server";
+import {
+  editSegment,
+  getDiarizationRow,
+  getRecordingRow,
+  getSegmentRow,
+  speakerNamer,
+  toSegmentDTO,
+} from "@/lib/recording-server";
 
 /**
  * 전사문 한 줄 고치기.
@@ -60,5 +67,11 @@ export async function PATCH(
   }
 
   logAgent(req, "전사문 한 줄 고치기", id, { segment: sid });
-  return NextResponse.json({ segment: toSegmentDTO(row) });
+  /*
+   * 이름 표를 함께 넘긴다. 소리로 가른 줄의 화자는 군집 **번호**로 저장되고
+   * 읽을 때 이름으로 풀리는데(`speakerNamer`), 여기서 그것을 빼먹으면 글만
+   * 고친 줄이 이 응답에서만 화자 없이 돌아온다. 화면이 그 한 줄을 제자리에
+   * 갈아 끼우면 목록에서 그 줄의 이름만 사라진다.
+   */
+  return NextResponse.json({ segment: toSegmentDTO(row, speakerNamer(getDiarizationRow(id))) });
 }

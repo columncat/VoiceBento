@@ -3,7 +3,8 @@ import { z } from "zod";
 
 import { logAgent } from "@/lib/agent-log";
 import { MODEL_NOTICE } from "@/lib/model";
-import { createRecording, listRecordings, withSession } from "@/lib/recording-server";
+import { createRecording, listRecordings, setRoster, withSession } from "@/lib/recording-server";
+import { dedupeRoster, optionalRoster } from "@/lib/roster-schema";
 import {
   MAX_SESSION_NAME,
   SessionPickError,
@@ -60,6 +61,9 @@ const createSchema = z.object({
    */
   sessionId: z.string().trim().min(1).optional(),
   newSessionName: z.string().trim().min(1).max(MAX_SESSION_NAME).optional(),
+
+  /** 말한 사람 목록. 선택 — 올리기(`upload/finish`)와 같은 뜻이고 같은 문을 지난다. */
+  roster: optionalRoster(),
 });
 
 /**
@@ -72,9 +76,28 @@ const createSchema = z.object({
 export async function POST(req: Request) {
   const parsed = createSchema.safeParse(await req.json().catch(() => null));
   if (!parsed.success) {
-    return NextResponse.json({ error: "fileId 가 필요합니다" }, { status: 400 });
+    /*
+     * **틀린 칸의 까닭을 말한다.** 예전에는 무엇이 틀렸든 "fileId 가 필요합니다" 였다 —
+     * 목록에 41자 이름을 넣어도 그 말이 떠서, 부르는 쪽(사람이든 에이전트든)은 멀쩡한
+     * fileId 를 고치러 간다. 목록 문구는 `roster-schema.ts` 가 한국어로 정해 두었고
+     * `upload/finish` 가 같은 방식으로 꺼내 쓴다.
+     */
+    const issues = parsed.error.issues;
+    const rosterIssue = issues.find((i) => i.path[0] === "roster");
+    const fileIssue = issues.find((i) => i.path[0] === "fileId");
+    return NextResponse.json(
+      {
+        error:
+          rosterIssue?.message ??
+          (fileIssue || !issues.length
+            ? "fileId 가 필요합니다"
+            : `요청의 ${String(issues[0].path[0] ?? "몸통")} 칸이 맞지 않습니다.`),
+      },
+      { status: 400 },
+    );
   }
   const { fileId, title, sourceName, sessionId, newSessionName } = parsed.data;
+  const roster = dedupeRoster(parsed.data.roster ?? []);
 
   /*
    * 세션을 **녹음을 세우기 전에** 정한다.
@@ -100,7 +123,10 @@ export async function POST(req: Request) {
     sessionId: resolved,
   });
 
-  logAgent(req, "녹음 세우기", row.title, { fileId, sessionId: resolved });
+  // 목록은 줄에 넣기 전에. 자동 분리가 빈 목록을 읽고 건너뛰지 않게 한다.
+  if (roster.length) setRoster(row.id, roster);
+
+  logAgent(req, "녹음 세우기", row.title, { fileId, sessionId: resolved, people: roster.length });
   enqueue(row.id);
 
   return NextResponse.json(

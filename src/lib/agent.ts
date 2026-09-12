@@ -10,14 +10,25 @@ import {
   type SegmentFlag,
 } from "./asr-models";
 import { db, schema } from "./db";
-import { asrModel, env } from "./env";
+import {
+  OTHER_SPEAKER,
+  diarBrief,
+  diarReadingCaveat,
+  type AgentDiarBrief,
+  type DiarModel,
+} from "./diar-models";
+import { asrModel, diarModel, env } from "./env";
 import {
   applyPolish,
+  diarRunId,
+  getDiarizationRow,
   getRecordingRow,
   getSummaryRow,
   listSegments,
+  setAgentDiarNames,
   setRecordingState,
   setSummary,
+  toDiarizationDTO,
 } from "./recording-server";
 import {
   agentKeyFor,
@@ -27,6 +38,7 @@ import {
   spendContext,
   touchSession,
 } from "./session-server";
+import { isUnsureLine, type DoubtLine } from "./speaker-doubt";
 import { DEFAULT_SUMMARY_PROMPT } from "./types";
 
 /**
@@ -251,16 +263,22 @@ async function readStatus(path: string, id: string): Promise<JobStatus> {
  * 에이전트가 돌려줘야 하는 모양.
  *
  * ```json
- * {"segments":[{"i":0,"text":"다듬은 글","speaker":"진행자","flag":null}, …]}
+ * {"segments":[{"i":0,"text":"다듬은 글","flag":null}, …]}
  * ```
  *
- * `i` 는 우리가 보낸 조각 번호 그대로다. `text` 와 `speaker` 는 없으면 안
- * 바꾼다는 뜻이고, 형식을 벗어난 것은 **전부 버린다** (fail closed).
- * 산문으로 답하든 필드를 지어내든 결과는 같다 — 아무 줄도 안 바뀐다.
+ * `i` 는 우리가 보낸 조각 번호 그대로다. `text` 는 없으면 안 바꾼다는 뜻이고,
+ * 형식을 벗어난 것은 **전부 버린다** (fail closed). 산문으로 답하든 필드를
+ * 지어내든 결과는 같다 — 아무 줄도 안 바뀐다.
  *
  * 왜 이렇게까지 하나: 여기 실려 오는 것은 남이 만든 파일에서 나온 글이고,
- * 그것을 읽은 모델의 출력이다. `speaker` 칸에 무엇이 들어오든 그것은 화면에
- * 사람 이름처럼 뜬다. 아는 칸만 취하고 길이를 자르는 것이 그 사이의 유일한 문이다.
+ * 그것을 읽은 모델의 출력이다. 아는 칸만 취하고 길이를 자르는 것이 그 사이의
+ * 유일한 문이다.
+ *
+ * ## `speaker` 가 **없어졌다**
+ *
+ * 예전에는 줄마다 화자 이름을 돌려받아 그대로 덮어썼다. 지금 화자는 소리로
+ * 가르고(`lib/diarize-assign.ts`), 에이전트가 정하는 것은 **군집 → 이름 표
+ * 하나**다. 근거가 다른 두 값이 같은 칸에 앉으면 화면에서 가를 길이 없다.
  *
  * ## `flag` — **다듬는 대신 표시하기**
  *
@@ -277,13 +295,9 @@ async function readStatus(path: string, id: string): Promise<JobStatus> {
 export interface PolishItem {
   i: number;
   text?: string;
-  speaker?: string | null;
   /** 표시. `null` 이면 "이번에는 표시할 것이 없다" 는 뜻이라 지운다. */
   flag?: SegmentFlag | null;
 }
-
-/** 화자 이름의 상한. 여기에 문장이 들어오면 그건 화자 이름이 아니다. */
-const MAX_SPEAKER_CHARS = 40;
 /** 다듬은 한 줄의 상한. 날 것보다 크게 길어질 이유가 없다. */
 const MAX_LINE_CHARS = 4000;
 
@@ -336,13 +350,17 @@ function readItems(list: unknown): PolishItem[] | null {
     const text = clean((v as { text?: unknown }).text, MAX_LINE_CHARS);
     if (text !== undefined) item.text = text;
 
-    const rawSpeaker = (v as { speaker?: unknown }).speaker;
-    if (rawSpeaker === null) {
-      item.speaker = null;
-    } else {
-      const speaker = clean(rawSpeaker, MAX_SPEAKER_CHARS);
-      if (speaker !== undefined) item.speaker = speaker;
-    }
+    /*
+     * **`speaker` 는 안 읽는다. 허용목록에서 뺐다 (fail closed).**
+     *
+     * 화자는 이제 소리로 가른다. 에이전트가 정하는 것은 줄마다의 이름이
+     * 아니라 **군집 → 이름 표 하나**다 (`setDiarNames`). 여기 칸을 남겨 두면
+     * 두 근거가 한 화면에서 뒤섞이는데, 어느 줄이 어느 쪽에서 나온 것인지는
+     * 아무 데도 안 보인다.
+     *
+     * 값이 와도 조용히 버린다 — 표시가 없는 것과 같아지므로 언제나 안전한
+     * 실패다. 저장하는 쪽(`applyPolish`)에도 그 칸이 이미 없다.
+     */
 
     /*
      * 표시는 **아는 값 넷만** 받는다.
@@ -366,7 +384,7 @@ function readItems(list: unknown): PolishItem[] | null {
      * 그래서 표시가 실제로 온 항목은 통과시킨다.
      */
     const carriesFlag = isSegmentFlag(rawFlag);
-    if (item.text !== undefined || item.speaker !== undefined || carriesFlag) out.push(item);
+    if (item.text !== undefined || carriesFlag) out.push(item);
   }
   return out.length > 0 ? out : null;
 }
@@ -402,6 +420,14 @@ export function parsePolish(raw: string): PolishItem[] | null {
  */
 interface AgentPolish {
   items: PolishItem[] | null;
+  /**
+   * 군집 → 이름 표. **에이전트가 돌려주는 유일한 화자 값이다.**
+   *
+   * 열쇠는 군집 번호(우리가 `S<번호>` 로 내보낸 것)이고, 값은 사람이 읽을
+   * 이름이다. 안 오면 null 이고 그때는 이름만 안 붙는다 — BentoAgent 가 아직
+   * 이 칸을 모르는 판본이어도 다듬기 자체는 그대로 돈다.
+   */
+  speakerNames: Record<number, string> | null;
   /** 답에 안 나온 조각 수. 긴 녹음에서 뒤쪽이 잘렸다는 신호다. */
   missingCount: number;
   /** 왜 버렸는지. 에이전트가 한국어로 적어 준다 — 그대로 사람에게 보여도 된다. */
@@ -410,8 +436,14 @@ interface AgentPolish {
 
 function readPolish(value: unknown): AgentPolish | null {
   if (!value || typeof value !== "object") return null;
-  const v = value as { segments?: unknown; missingCount?: unknown; notes?: unknown };
+  const v = value as {
+    segments?: unknown;
+    speakerNames?: unknown;
+    missingCount?: unknown;
+    notes?: unknown;
+  };
   const items = readItems(v.segments);
+  const speakerNames = readSpeakerNames(v.speakerNames);
   const missingCount =
     typeof v.missingCount === "number" && Number.isFinite(v.missingCount)
       ? Math.max(0, Math.trunc(v.missingCount))
@@ -419,7 +451,415 @@ function readPolish(value: unknown): AgentPolish | null {
   const notes = Array.isArray(v.notes)
     ? v.notes.map((n) => clean(n, 300)).filter((n): n is string => n !== undefined).slice(0, 6)
     : [];
-  return { items, missingCount, notes };
+  return { items, speakerNames, missingCount, notes };
+}
+
+// ─────────────────────────────────────────────────────────────
+//   화자 — 에이전트에게 **사실만** 댄다
+// ─────────────────────────────────────────────────────────────
+
+/**
+ * 군집 하나를 에이전트에게 부르는 열쇠. **`S<군집번호>` 이지 순위가 아니다.**
+ *
+ * 순위(말한 시간 1등이 S1)로 붙이지 않는 이유가 둘이다.
+ *
+ * 1. **되짚을 때 상태가 필요 없다.** 순위로 붙이면 보낼 때의 순위표를 어딘가
+ *    들고 있다가 답이 올 때 그대로 써야 하는데, 그 사이에 문턱만 바꿔 다시
+ *    붙이는 길(`saveDiarization`)이 지나가면 순위가 바뀐다. 그러면 이름이
+ *    **조용히 다른 사람에게** 앉는다. 번호를 그대로 쓰면 되짚는 셈이 없다.
+ * 2. 목록이 `S2, S0, S1` 처럼 뒤죽박죽으로 보이는 것이 오히려 낫다 — 번호가
+ *    순서를 뜻하지 않는다는 것이 한눈에 보인다. 첫 등장 순서로 이름을 찍는
+ *    것은 27.8~36.1%, 곧 찍기와 같다.
+ */
+export function clusterTag(k: number): string {
+  return `S${k}`;
+}
+
+/** `S3` → 3. 우리가 낸 모양이 아니면 null 이고, 그런 열쇠는 버린다. */
+export function readClusterTag(tag: unknown): number | null {
+  if (typeof tag !== "string") return null;
+  const m = /^[Ss](\d{1,4})$/.exec(tag.trim());
+  if (!m) return null;
+  const n = Number(m[1]);
+  return Number.isInteger(n) ? n : null;
+}
+
+/** 화자 이름의 길이. 넘으면 이름이 아니라 문장이다 (BentoAgent 의 `MAX_SPEAKER` 와 같은 값). */
+const MAX_SPEAKER_NAME = 40;
+
+/**
+ * 이름 자리에 온 **되풀이 이름**. 코드로 막는다.
+ *
+ * 안내문은 "근거가 없으면 비워 둬라" 고 시키지만, 모델은 빈칸을 싫어해서
+ * "화자1"·"남성1"·"Speaker 2" 를 채워 넣는다. 그것은 우리가 이미 붙여 둔
+ * 임시 이름(`placeholderNames` 의 "화자 N")을 **다른 글자로 쓴 것뿐**인데,
+ * 화면에서는 에이전트가 근거를 갖고 정한 이름과 똑같이 보인다. 없는 근거가
+ * 있는 것처럼 보이게 만드는 값이라 받지 않는다 — 버리면 임시 이름이 그대로
+ * 남을 뿐이라 언제나 안전한 실패다.
+ */
+const FILLER_NAME =
+  /^(?:화자|발화자|말하는\s*사람|참석자|speaker|spk|voice|person|남성|여성|남자|여자|male|female|man|woman|s)\s*[-_]?\s*\d{1,3}$/iu;
+
+/**
+ * 에이전트가 돌려준 이름 표를 읽는다. **허용목록이다.**
+ *
+ * 우리가 낸 열쇠(`S<번호>`)가 아니면 버리고, 이름은 `clean()` 규율을 그대로
+ * 지난다. 여기 오는 것은 남이 만든 소리에서 받아 적은 글을 읽은 모델의
+ * 출력이고, 그 값은 곧 화면의 화자 이름이 된다.
+ *
+ * ## 칸이 **안 온 것**과 **비어 온 것**을 가른다
+ *
+ * - 안 왔으면(`null`) 이 칸을 모르는 판본의 BentoAgent 다. 아무것도 안 한다.
+ * - 비어 왔으면(`{}`) 에이전트가 "전사문에 근거가 없어 비워 뒀다" 고 답한
+ *   것이다. 안내문이 바로 그렇게 시키므로 앞선 판의 **에이전트** 이름을
+ *   거둔다 (사람이 정한 이름은 `setAgentDiarNames` 가 지킨다). 되풀이 이름만
+ *   와서 전부 걸러진 것도 같다 — 근거 없는 이름이었으니까.
+ *
+ * 둘을 한 값(`null`)으로 뭉개면, 에이전트가 앞선 판의 잘못 짚은 이름을
+ * "근거가 없다" 며 비워도 그 이름이 영영 안 지워진다.
+ */
+function readSpeakerNames(v: unknown): Record<number, string> | null {
+  if (!v || typeof v !== "object" || Array.isArray(v)) return null;
+  const out: Record<number, string> = {};
+  for (const [key, raw] of Object.entries(v as Record<string, unknown>)) {
+    const cluster = readClusterTag(key);
+    if (cluster === null) continue;
+    // 한 글자 넉넉히 읽어 본다. 상한을 넘으면 이름이 아니라 문장이다 — 잘라서 이름인 척하지 않는다.
+    const name = clean(raw, MAX_SPEAKER_NAME + 1);
+    if (!name || name.length > MAX_SPEAKER_NAME) continue;
+    // 칸막이와 꺾쇠는 화면에도 프롬프트에도 뜻이 있는 글자다. 이름에 둘 이유가 없다.
+    if (/[|<>]/.test(name)) continue;
+    if (FILLER_NAME.test(name)) continue;
+    out[cluster] = name;
+  }
+  return out;
+}
+
+// ─────────────────────────────────────────────────────────────
+//   덜 확실한 자리 — **단정하지 않는 쪽으로만** 쓴다
+// ─────────────────────────────────────────────────────────────
+
+/**
+ * 이 줄의 이름 뒤에 `?` 를 붙이나. **화면의 "덜 또렷" 표시와 같은 함수다.**
+ *
+ * 규칙과 문턱은 `speaker-doubt.ts` 한 곳에 있고 문턱 값은 서술자의
+ * `wordSilhouette.flagAt`(−0.2)이다. 예전에는 여기 −0.2 가 따로 박혀 있었고
+ * 화면은 녹음 안 상대 순위로 따로 셈해서, 사용자 녹음 한 편(67줄)에서 화면 11줄 ·
+ * 여기 2줄로 갈렸다. 사람이 대화창에서 "`?` 붙은 줄" 을 물으면 둘이 같은 줄을
+ * 가리켜야 한다. 왜 −0.2 쪽을 남겼는지는 그 파일에 적었다(낱말 단위 실측).
+ *
+ * 서술자에 `wordSilhouette` 가 없는 모델이면 문턱이 null 이라 `?` 가 안 붙는다.
+ */
+type UnsureInput = DoubtLine;
+
+export function isUnsureSpeaker(s: UnsureInput): boolean {
+  return isUnsureLine(s, diarModel.wordSilhouette?.flagAt ?? null);
+}
+
+/**
+ * 화자 표시를 얼마나 믿을 수 있나 — **서술자의 세 숫자에서 셈한다.**
+ *
+ * 손으로 "74%" 를 적지 않는다. 임베딩을 갈아 끼우는 날 조용히 옛말이 되고,
+ * 화자 이야기에서 옛말은 "이 이름을 믿어라" 로 읽힌다. 정밀도 p · 재현율 r ·
+ * 표시율 f 만 있으면 나머지가 나온다:
+ *
+ * - 표시되고 틀린 낱말의 몫 = p·f
+ * - 틀린 낱말 전체의 몫 W = p·f / r
+ * - **표시 없는 낱말이 틀리는 몫** = (W − p·f) / (1 − f)
+ *
+ * 검산 (AMI 9편, 낱말 31,839개): W 는 셈 26.3% · 실측 26.5%, 표시 없는 낱말의
+ * 오류는 셈 25.1% · 실측 25.2%. 셋째 줄이 요점이다 — `?` 가 없는 자리도
+ * **넷 중 하나**는 틀린다.
+ */
+export interface DiarAccuracy {
+  /** 틀린 낱말의 몫. */
+  wrong: number;
+  /** `?` 없는 낱말이 틀리는 몫. */
+  unflaggedWrong: number;
+  /** `?` 가 붙었는데 맞은 몫 (1 − 정밀도). */
+  falseFlag: number;
+  /** 틀렸는데 `?` 가 안 붙은 몫 (1 − 재현율). */
+  missed: number;
+}
+
+export function diarAccuracy(m: DiarModel): DiarAccuracy | null {
+  const w = m.wordSilhouette;
+  if (!w || !(w.precision > 0) || !(w.recall > 0) || !(w.flagRate > 0 && w.flagRate < 1)) {
+    return null;
+  }
+  const flaggedWrong = w.precision * w.flagRate;
+  const wrong = flaggedWrong / w.recall;
+  if (!(wrong > 0 && wrong < 1)) return null;
+  return {
+    wrong,
+    unflaggedWrong: (wrong - flaggedWrong) / (1 - w.flagRate),
+    falseFlag: 1 - w.precision,
+    missed: 1 - w.recall,
+  };
+}
+
+// ─────────────────────────────────────────────────────────────
+//   에이전트에게 보내는 화자 사실
+// ─────────────────────────────────────────────────────────────
+
+/** 군집 하나에 대해 **우리가 아는 사실. 숫자뿐이다.** 이름은 `AgentDiarFacts.untrusted` 에 따로 있다. */
+export interface AgentClusterFact {
+  /** 이름을 붙일 때 쓰는 열쇠. `S<군집번호>`. */
+  id: string;
+  /** 이 군집이 으뜸인 줄들의 말한 시간 합 (초). */
+  talkSeconds: number;
+  /** 이 군집이 으뜸인 줄 수. */
+  lines: number;
+  /*
+   * `firstAt`(이 군집이 처음 나오는 시각)은 **일부러 안 싣는다.**
+   *
+   * 앞선 판은 "자리를 찾는 데만 써라" 는 말을 붙여 실었다. 그런데 무리마다
+   * 시각을 하나씩 주면 그것이 곧 **첫 등장 순서**다 — 모델은 줄 세우는 데
+   * 한 줄의 셈도 필요 없다. 첫 등장 순서로 이름을 맞히면 27.8~36.1% 로 찍기와
+   * 같고(AMI 9편), 그럴듯해 보여서 안내문보다 숫자가 이긴다. 자리를 찾는
+   * 일은 다듬기 몸통의 줄마다 `cluster` 가 이미 한다.
+   */
+  /**
+   * 목록 인원 안에 드는 군집인가.
+   *
+   * 말한 시간 상위 L개만 이름을 받고 나머지는 `other` 다 (신탁과 0.1pt 이내).
+   * 남는 무리는 대개 사람이 아니라 기침·웃음·겹쳐 말한 자리다 — `k = L + 2`
+   * 로 일부러 자리를 더 만들어 그것들을 따로 앉히기 때문이다.
+   */
+  ranked: boolean;
+}
+
+/**
+ * 다듬기·대화에 실어 보내는 **화자에 대한 사실.**
+ *
+ * ## 울타리 밖과 안을 가른다
+ *
+ * 바깥 칸은 전부 우리 DB 에서 센 숫자이거나 **코드가 쓴 글**이다(서술자의
+ * 쪽지, 서술자의 숫자에서 지은 `caveat`). 저쪽은 그것을 울타리 없이 싣는다 —
+ * 울타리를 치면 모델은 "참고만 하라" 로 읽는데 여기 적힌 것은 실제로 따라야
+ * 하는 사실이다 (`modelBrief` 와 같은 규율).
+ *
+ * **사람이 친 글과 모델이 쓴 글은 한 글자도 바깥에 두지 않는다.** 그것은
+ * `untrusted` 한 칸에 모으고 저쪽이 `<speakers>` 울타리 안에 싣는다. 까닭은
+ * 그 칸의 설명에 있다.
+ */
+export interface AgentDiarFacts {
+  /** 서술자가 정한 것 — 모델 이름·k·`other` 이름표·쪽지. **목록 이름은 뺐다.** */
+  model: Omit<AgentDiarBrief, "roster">;
+  /** 워커에게 준 무리 수 `k` (= 목록 인원 + 2). */
+  requested: number;
+  /** 실제로 나온 군집 수. */
+  found: number;
+  /** 사람이 적어 준 목록의 인원 수. 이름 자체는 `untrusted.roster`. */
+  rosterSize: number;
+  /** 군집들. **말한 시간이 많은 순** — 이 차례가 곧 힌트다 (1등 군집이 1등 화자인 것이 9편 중 8편). */
+  clusters: AgentClusterFact[];
+  /** 구간 실루엣의 중앙값. 모르면 null. */
+  silhouetteMedian: number | null;
+  /**
+   * 이 녹음을 통째로 의심해야 하나. **서버가 문턱을 적용한 값이다.**
+   *
+   * 원래 쓰려던 "나온 무리 수 < 요청한 수" 는 AMI 9편에서 0번 울렸다 —
+   * 안 울리는 경고는 없는 경고다. 이 눈금은 Spearman 0.72~0.97 로 붙어 다닌다.
+   */
+  fileWarning: boolean;
+  /**
+   * 화자 신뢰도(실루엣)를 **재지 못했다면** 그 이유. 쟀으면 null.
+   *
+   * 이 칸이 서면 `fileWarning` 이 false 이고 `unsureLines` 가 0 인 것이 "괜찮다"
+   * 가 아니라 "잴 수 없었다" 다. `caveat` 은 이때 `?` 비율 문장 대신 그 사실을 싣는다.
+   */
+  silhouetteMissing: string | null;
+  /**
+   * 이름 뒤에 `?` 가 붙는 줄 수 (`isUnsureSpeaker` — 화면의 표시와 같은 줄).
+   *
+   * **"틀린 줄 수" 가 아니다.** 낱말 단위로 재면 표시된 낱말도 다섯에 하나는 맞고
+   * 틀린 낱말의 대부분에는 표시가 없다. 줄 단위로는 잰 적이 없다.
+   */
+  unsureLines: number;
+  /** 낱말 단위 표시의 실력. 모르면 null. **확신의 근거가 아니라 한계의 근거다.** */
+  wordSilhouette: DiarModel["wordSilhouette"];
+  /** 요약·대화·다듬기에 붙는 한계 문장. `diarCaveat` 이 이 사실에서 짓는다. */
+  caveat: string[];
+  /**
+   * **사람이 쓴 글이거나 모델이 쓴 글.** 저쪽은 이것을 울타리 안에만 싣는다.
+   *
+   * - `roster` — 사용자가 이 앱에 적어 넣은 참석자 이름.
+   * - `labels` — 무리마다 지금 붙어 있는 이름 (`S3` → 이름). 앞선 다듬기가
+   *   **남이 만든 녹음의 전사문을 읽고** 붙였거나 사람이 고친 것이다.
+   *
+   * 뒤의 것이 이 칸을 가른 까닭이다. 녹음에 이름처럼 들리는 지시문을 넣어
+   * 두면, 한 번 다듬고 난 뒤부터 그 글이 다음 요청마다 **사실의 자리**에
+   * 실린다 — 40자 상한과 칸막이 글자 제거로는 막히지 않는다. 앞의 것은 사용자
+   * 본인이 친 글이라 덜 위험하지만, "사람이 친 글은 울타리 안" 이 규율이고
+   * 예외를 두면 다음에 칸을 더하는 사람이 어느 쪽인지 다시 따져야 한다.
+   *
+   * 임시 이름("화자 1")과 `other` 는 안 싣는다. 코드가 만든 것이고, 무엇이
+   * 이름을 받는 자리인지는 `clusters[].ranked` 가 이미 말한다.
+   */
+  untrusted: { roster: string[]; labels: Record<string, string> };
+}
+
+/**
+ * 이 녹음의 화자 사실을 모은다. 분리를 안 했거나 못 했으면 null.
+ *
+ * 조각 목록을 **받아서** 쓴다. 다듬기는 이미 그것을 들고 있고, 수천 줄짜리
+ * 전사문을 한 번 더 읽을 이유가 없다.
+ */
+export function diarFacts(
+  recordingId: string,
+  segments: PolishSegments,
+): AgentDiarFacts | null {
+  const row = getDiarizationRow(recordingId);
+  if (!row) return null;
+
+  const d = toDiarizationDTO(row, diarModel.fileWarnSilhouetteMedian);
+  if (!d.talkTime.length) return null;
+
+  let unsureLines = 0;
+  const lines = new Map<number, number>();
+  const talk = new Map<number, number>();
+  for (const s of segments) {
+    if (isUnsureSpeaker(s)) unsureLines += 1;
+    const k = s.speakerCluster;
+    if (s.speakerSource !== "acoustic" || k === null || k === undefined) continue;
+    lines.set(k, (lines.get(k) ?? 0) + 1);
+    talk.set(k, (talk.get(k) ?? 0) + Math.max(0, s.end - s.start));
+  }
+
+  /*
+   * 차례는 **저장된 그대로** 둔다. 여기서 다시 정렬하지 않는다.
+   *
+   * `speakerNamer` 가 임시 이름을 나눠 줄 때 쓰는 차례가 바로 이것이라
+   * (`placeholderNames(order, …)`), 여기서 따로 정렬하면 `ranked` 와 화면의
+   * "화자 1" 이 서로 다른 군집을 가리킬 수 있다. 저장하는 쪽이 말한 시간
+   * 내림차순으로 적는다는 것이 `DiarizationDTO.talkTime` 의 계약이다.
+   */
+  const rosterSize = d.roster.length;
+  const clusters: AgentClusterFact[] = d.talkTime.map((t, i) => ({
+    id: clusterTag(t.k),
+    // 워커가 잰 구간 시간이 정본이다. 줄에서 더한 값은 조각이 겹칠 때 부풀 수 있다.
+    talkSeconds: Number((t.seconds || talk.get(t.k) || 0).toFixed(1)),
+    lines: lines.get(t.k) ?? 0,
+    ranked: rosterSize > 0 ? i < rosterSize : true,
+  }));
+
+  const { roster, ...brief } = diarBrief(diarModel, d.roster);
+  const labels: Record<string, string> = {};
+  for (const [k, name] of Object.entries(d.names)) {
+    const n = Number(k);
+    if (Number.isInteger(n)) labels[clusterTag(n)] = name;
+  }
+
+  const base = {
+    model: brief,
+    requested: d.clusters,
+    found: d.found,
+    rosterSize,
+    clusters,
+    silhouetteMedian: d.silhouetteMedian,
+    fileWarning: d.lowConfidence,
+    silhouetteMissing: d.silhouetteMissing,
+    unsureLines,
+    wordSilhouette: diarModel.wordSilhouette,
+  };
+  return { ...base, caveat: diarCaveat(base), untrusted: { roster, labels } };
+}
+
+type DiarCaveatInput = Pick<
+  AgentDiarFacts,
+  "found" | "clusters" | "fileWarning" | "unsureLines" | "silhouetteMissing"
+>;
+
+/** 몫을 사람이 읽는 퍼센트로. 소수점은 안 쓴다 — 여기 숫자는 어림이지 눈금이 아니다. */
+function pctOf(x: number): string {
+  return `${Math.round(x * 100)}%`;
+}
+
+/**
+ * 요약·대화·다듬기에 붙이는 **한계 문장.** 손으로 적지 않고 사실에서 짓는다.
+ *
+ * `agentReadingCaveat` 과 같은 결이다. 숫자는 전부 서술자에서 셈한다
+ * (`diarAccuracy`) — 모델을 갈아 끼우면 문장도 따라 바뀌고, 재 두지 않은
+ * 모델이면 "재 두지 않았다" 고 말한다.
+ *
+ * **단정하지 않는다.** `?` 가 붙은 자리도 다섯 중 하나는 맞고 `?` 가 없는
+ * 자리도 넷 중 하나는 틀린다. 그래서 "이 줄은 누구의 말도 아니다" 가 아니라
+ * "덜 확실하다" 까지만 말하고, 대신 **여러 줄이 한결같을 때만** 누구의 말로
+ * 옮기라고 시킨다.
+ *
+ * 한 문장은 500자를 안 넘게 짓는다 — 저쪽이 넘치는 문장을 **빼기** 때문이다
+ * (자르면 "틀렸다는 뜻이 아니다" 의 "아니다" 가 떨어져 뜻이 뒤집힌다).
+ */
+export function diarCaveat(facts: DiarCaveatInput | null): string[] {
+  if (!facts) {
+    return [
+      "이 전사문에는 **화자 표시가 없다.** 소리로 가르지 않았거나 가르지 못했다.",
+      "누가 말했는지는 대사의 흐름에서 짐작할 수 있을 뿐이다. 이름을 지어내지 말고,",
+      "말한 사람을 가려 적어야 하면 확실하지 않다고 함께 적어라.",
+    ];
+  }
+
+  const out = [diarReadingCaveat(diarModel, facts.fileWarning)];
+
+  /*
+   * 정확도를 **수로** 적는다. "틀릴 수 있다" 만 적으면 모델은 그것을 예의로
+   * 읽고 평소처럼 단정한다. 숫자가 있으면 한 줄을 근거로 삼는 것이 왜 위험한
+   * 일인지가 그 자리에서 드러난다.
+   */
+  const acc = diarAccuracy(diarModel);
+  if (acc && facts.silhouetteMissing) {
+    /*
+     * **재지 못한 판이다.** `?` 가 하나도 붙을 수 없는데 `?` 의 비율 문장을 실으면,
+     * 모델은 `?` 가 없는 줄을 "확실한 줄" 로 읽는다. 대신 그 사실을 싣는다.
+     * 틀리는 비율 문장은 남긴다 — 그건 이 녹음의 신뢰도와 상관없이 참이다.
+     */
+    out.push(
+      `화자 표시는 낱말 단위로 붙어 있고, 회의 녹음으로 재면 낱말의 ${pctOf(acc.wrong)}가 ` +
+        "다른 사람에게 붙는다. 한 줄만 보고 누구의 말이라고 옮기지 마라 — 같은 이름이 " +
+        "붙은 여러 줄이 한결같을 때만 그 사람 말로 다뤄라.",
+      "이 녹음은 화자 신뢰도를 **재지 못했다** " +
+        `(${facts.silhouetteMissing.slice(0, 160)}). 그래서 이름 뒤에 \`?\` 가 하나도 붙지 ` +
+        "않고 녹음 전체에 대한 경고도 없다 — 표시가 없다고 확실한 것이 아니다. " +
+        "어느 줄이 덜 확실한지 물으면 잴 수 없었다고 답해라.",
+    );
+  } else if (acc) {
+    out.push(
+      `화자 표시는 낱말 단위로 붙어 있고, 회의 녹음으로 재면 낱말의 ${pctOf(acc.wrong)}가 ` +
+        "다른 사람에게 붙는다. 한 줄만 보고 누구의 말이라고 옮기지 마라 — 같은 이름이 " +
+        "붙은 여러 줄이 한결같을 때만 그 사람 말로 다뤄라.",
+      /*
+       * 비율은 **낱말 단위로** 잰 것이고, 인용하는 숫자는 `?` 가 실제로 쓰는 문턱
+       * (`flagAt`)에서 잰 값이다. 줄에 대해 "몇 %" 라고 단정하지 않는다 — 줄 단위로는
+       * 잰 적이 없다.
+       */
+      "이름 뒤의 `?` 는 **덜 확실하다**는 뜻이지 틀렸다는 뜻이 아니다. 낱말 단위로 재면 " +
+        `\`?\` 문턱에 걸린 낱말도 ${pctOf(acc.falseFlag)}는 맞았고, 틀린 낱말의 ` +
+        `${pctOf(acc.missed)}는 문턱에 걸리지 않았다 — 걸리지 않은 낱말도 ` +
+        `${pctOf(acc.unflaggedWrong)}쯤 틀린다. 줄 단위로는 잰 적이 없다. \`?\` 줄을 버리거나 ` +
+        '"누구의 말도 아니다" 라고 하지 마라.',
+    );
+    if (facts.unsureLines > 0) {
+      out.push(`이 녹음에서 이름 뒤에 \`?\` 가 붙은 줄은 ${facts.unsureLines}개다.`);
+    }
+  } else {
+    out.push(
+      "이 분리 모델로는 화자 표시가 얼마나 틀리는지 재 두지 않았다. 그래서 `?` 표시도 " +
+        "붙이지 않는다 — 표시가 없다고 확실한 것이 아니다. 같은 이름이 붙은 여러 줄이 " +
+        "한결같을 때만 그 사람 말로 다뤄라.",
+    );
+  }
+
+  const named = facts.clusters.filter((c) => c.ranked).length;
+  if (named < facts.found) {
+    out.push(
+      `이 녹음에서 나온 목소리 무리는 ${facts.found}개이고 그중 ${named}개에만 ` +
+        `이름이 붙는다. 나머지는 \`${OTHER_SPEAKER}\` 로 묶여 있다 — 목록에 없던 ` +
+        "사람이거나, 기침·웃음·여럿이 겹쳐 말한 자리다.",
+    );
+  }
+
+  return out;
 }
 
 /** 다듬기 쪽지가 에이전트 입구의 표지 상한을 넘을 때. */
@@ -534,6 +974,22 @@ function polishBody(recordingId: string, segments: PolishSegments, context: stri
      * 없다 — 그것이 서술자를 한 곳에 모은 값이다.
      */
     model: modelBrief(asrModel),
+    /**
+     * 소리로 가른 결과. **사실만 담는다** (`diarFacts`).
+     *
+     * 에이전트가 할 일은 **군집 → 이름 표 하나**를 돌려주는 것이고, 그러려면
+     * 어느 무리가 어느 줄을 말했는지를 알아야 한다. 그래서 이 표와 함께 아래
+     * 조각마다 `cluster` 를 실어 보낸다.
+     *
+     * 분리를 안 했거나 못 했으면 null 이다. 그때는 이름이 안 붙을 뿐 다듬기는
+     * 그대로 돈다 — 전사문이 화자 분리보다 먼저다.
+     *
+     * **칸 이름은 `diar` 다.** 대화 몸통(`api/recordings/[id]/chat`)과 같은
+     * 이름이어야 한다 — 저쪽은 두 입구를 `voiceIds()` 한 곳에서 읽는다. 이름이
+     * 어긋나면 저쪽이 조용히 null 로 읽고 `[화자 나눔]` 에 "화자 표시가 없다"
+     * 를 싣는데, 아래 조각마다에는 `S3` 가 붙어 가서 한 요청이 제 말을 뒤집는다.
+     */
+    diar: diarFacts(recordingId, segments),
     /*
      * `raw` 를 보낸다. 이미 다듬은 `text` 가 아니다.
      *
@@ -545,6 +1001,28 @@ function polishBody(recordingId: string, segments: PolishSegments, context: stri
       start: Number(s.start.toFixed(2)),
       end: Number(s.end.toFixed(2)),
       raw: s.raw,
+      /*
+       * 이 줄에서 가장 오래 말한 무리. **이름이 아니라 번호다.**
+       *
+       * 이름(`화자 1`)을 보내면 에이전트가 그것을 고쳐 돌려주고 싶어지는데,
+       * 돌려받는 칸은 줄이 아니라 군집이라 그럴 자리가 없다. 번호로 보내면
+       * "이 줄은 S3 가 말했다 → S3 는 김부장이다" 라는 한 방향만 남는다.
+       *
+       * 소리로 가른 줄에만 붙인다. 옛 녹음의 `agent-guess` 나 사람이 손으로
+       * 적은 이름은 여기 실리지 않는다 — 근거가 다른 값을 한 칸에 담으면
+       * 저쪽에서 가를 길이 없다.
+       */
+      ...(s.speakerSource === "acoustic" && s.speakerCluster !== null && s.speakerCluster !== undefined
+        ? { cluster: clusterTag(s.speakerCluster) }
+        : {}),
+      /*
+       * 이 줄 안에서 화자가 바뀐다. AMI 조각의 **52.2%**가 그렇다.
+       *
+       * 이름을 정하는 근거로는 **약한 줄**이라는 뜻이다 — 한 줄에 두 사람
+       * 말이 섞여 있으니 "이 줄에서 자기 이름을 말했다" 를 그대로 믿으면 안
+       * 된다. 그 판단을 저쪽에서 하라고 사실만 얹는다.
+       */
+      ...(s.speakerRuns && s.speakerRuns.length > 1 ? { mixed: true } : {}),
     })),
     context,
   };
@@ -577,6 +1055,13 @@ export async function startPolish(
   if (segments.length === 0) {
     throw new AgentUnavailableError("다듬을 전사문이 아직 없습니다");
   }
+  /*
+   * 이 몸통의 군집 번호가 **어느 화자 판의 것인가.** 조각을 읽은 바로 그 자리에서 잰다 —
+   * 사이에 `await` 가 없으니 다른 판이 끼어들 틈이 없다. 답이 오면 이 판과 견준다
+   * (`polishSentRuns`).
+   */
+  const diarRow = getDiarizationRow(recordingId);
+  const sentRun = diarRow ? diarRunId(diarRow) : null;
 
   const cover = context ?? buildPolishContext(recordingId, null);
   const body = polishBody(recordingId, segments, cover);
@@ -620,6 +1105,7 @@ export async function startPolish(
   if (typeof json.id !== "string" || !json.id) {
     throw new AgentUnavailableError("에이전트가 작업 번호를 주지 않았습니다");
   }
+  polishSentRuns.set(recordingId, { jobId: json.id, run: sentRun });
   touchSession(rec?.sessionId ?? null);
   return json.id;
 }
@@ -694,6 +1180,20 @@ export async function advancePolish(recordingId: string): Promise<void> {
   const changed = applyPolish(recordingId, items);
 
   /*
+   * 이름을 앉힌다. **줄이 아니라 군집에.**
+   *
+   * `applyPolish` 에는 화자 칸이 없다 (`recording-server.ts` 의 설명). 화자에
+   * 대해 에이전트가 정하는 것은 이 표 하나뿐이고, 그 표는 `diarizations` 행에
+   * 앉아 읽을 때 풀린다 — 이름 하나를 고치는 데 수천 줄을 다시 쓰지 않는다.
+   */
+  const sent = polishSentRuns.get(recordingId);
+  const named = applySpeakerNames(
+    recordingId,
+    fromAgent?.speakerNames ?? null,
+    sent && sent.jobId === row.polishJobId ? sent.run : undefined,
+  );
+
+  /*
    * 못 다듬은 조각이 있으면 **말한다.**
    *
    * 긴 녹음에서는 모델 출력 상한에 걸려 뒤쪽 조각이 통째로 안 온다. 그건
@@ -702,6 +1202,51 @@ export async function advancePolish(recordingId: string): Promise<void> {
    * "왜 저기만 화자가 없지" 하게 된다.
    */
   const leftovers: string[] = [];
+
+  /*
+   * 이름이 어떻게 됐는지 **말한다.**
+   *
+   * 셋을 가른다 — 에이전트가 이 칸을 모르는 판본이라 **안 보낸 것**, 전사문에
+   * 근거가 없어 **비워 보낸 것**(안내문이 그렇게 시킨다), 실제로 붙인 것.
+   * 화면에서는 셋이 똑같이 "이름이 그대로네" 로 보이므로 문장으로 가른다.
+   * 사람이 정한 이름을 지켰으면 그것도 말한다 — 에이전트가 다른 이름을 냈는데
+   * 안 바뀐 까닭이 거기 있다.
+   */
+  if (getDiarizationRow(recordingId)) {
+    if (named?.stale) {
+      /*
+       * 보낸 뒤에 화자를 다시 나눴다. 옛 번호의 이름을 새 판에 앉히면 다른 목소리에 앉으므로
+       * 버렸다 (`setAgentDiarNames`). 조용히 버리면 사람은 에이전트가 이름을 못 찾은 줄 안다.
+       */
+      leftovers.push(
+        "다듬기를 보낸 뒤 화자를 다시 나눠 목소리 번호가 바뀌었습니다. 에이전트가 옛 번호로 " +
+          "붙인 이름은 다른 목소리에 앉을 수 있어 붙이지 않았습니다 — 다듬기를 다시 누르면 새 " +
+          "번호로 붙입니다.",
+      );
+    } else if (!fromAgent || fromAgent.speakerNames === null) {
+      leftovers.push(
+        "에이전트가 목소리 무리의 이름 표를 보내지 않았습니다 (이 칸을 모르는 판본일 수 " +
+          "있습니다). 이름은 앞서 붙은 그대로입니다.",
+      );
+    } else if (named && named.applied > 0) {
+      leftovers.push(`목소리 무리 ${named.applied}개에 이름을 붙였습니다.`);
+    } else {
+      leftovers.push("전사문에 이름이 드러난 목소리 무리가 없어 에이전트가 붙인 이름은 없습니다.");
+    }
+    if (named && named.keptHuman > 0) {
+      leftovers.push(`직접 정하신 이름 ${named.keptHuman}개는 그대로 두었습니다.`);
+    }
+    if (named && named.rejected > 0) {
+      /*
+       * 버린 것도 **말한다.** 에이전트가 이름을 냈는데 화면에 안 뜨면 사람은
+       * 에이전트가 못 알아낸 줄 안다 — 실제로는 목록 밖 이름이라 버린 것이다.
+       */
+      leftovers.push(
+        `에이전트가 낸 이름 ${named.rejected}개는 적어 주신 화자 목록에 없거나 ` +
+          `목록 인원 밖의 목소리라 붙이지 않았습니다.`,
+      );
+    }
+  }
 
   /*
    * 표시된 줄이 있으면 **말한다.**
@@ -749,6 +1294,49 @@ export async function advancePolish(recordingId: string): Promise<void> {
         : null,
   );
 }
+
+/**
+ * 군집 → 이름 표를 앉힌다.
+ *
+ * ## 칸이 안 왔으면 **아무것도 안 한다**
+ *
+ * `null` 은 이 칸을 모르는 판본의 BentoAgent 다. 그때마다 표를 비우면 앞선
+ * 판의 이름이 다시 다듬을 때마다 사라진다. 안 온 것은 "이름을 지워라" 가
+ * 아니라 "이번에는 말할 것이 없다" 다. 비어 온 것(`{}`)과는 다르다 —
+ * `readSpeakerNames` 의 설명.
+ *
+ * ## 왔으면 에이전트의 몫을 갈아 끼우고 사람의 몫은 **안 건드린다**
+ *
+ * 그 규율은 저장하는 쪽(`setAgentDiarNames`)에 있다. 나온 적 없는 군집 번호도
+ * 거기서 버려진다.
+ *
+ * ## 보낼 때의 판을 함께 싣는다 (`sentRun`)
+ *
+ * 다듬기 도중에 화자를 다시 나누면 옛 번호의 이름이 새 판의 다른 목소리에 앉는다. 지금은
+ * 상태 잠금이 대부분 막지만(다듬는 중에는 다시 나누기가 409, 나누는 중에는 다듬기가 409)
+ * 잠금은 라우트마다 따로 서 있어 한 곳이 풀리면 조용히 뚫린다. 판을 실어 두면 저장하는
+ * 쪽이 스스로 막는다.
+ */
+function applySpeakerNames(
+  recordingId: string,
+  names: Record<number, string> | null,
+  sentRun: string | null | undefined,
+): { applied: number; keptHuman: number; rejected: number; stale: boolean } | null {
+  if (!names) return null;
+  return setAgentDiarNames(recordingId, names, sentRun);
+}
+
+/**
+ * 녹음마다 **지금 도는 다듬기를 보낼 때의 화자 판** (`diarRunId`, 분리가 없었으면 null).
+ *
+ * 작업 번호를 함께 적어, 답이 온 작업이 적어 둔 그 작업일 때만 판을 견준다. 번호가 다르거나
+ * 없으면(`undefined`) 판을 안 본다 — 이 프로세스가 보낸 작업이 아니라는 뜻인데, 앱이 다시
+ * 뜨면 도는 다듬기는 접히므로(`recoverStaleJobs`) 실제로는 나오지 않는 갈래다.
+ *
+ * DB 칸이 아니라 메모리에 두는 이유: 위와 같이 다시 뜨면 그 다듬기는 어차피 이름을 앉히지
+ * 못하고 끝난다. 녹음마다 한 칸이라 쌓이지 않는다.
+ */
+const polishSentRuns = new Map<string, { jobId: string; run: string | null }>();
 
 /** 다듬기를 끝낸다. 실패해도 녹음은 `done` 이다 — 전사문은 이미 멀쩡하다. */
 function finishPolish(recordingId: string, error: string | null): void {
@@ -998,6 +1586,20 @@ function fenceUntrusted(text: string): string {
   return `<untrusted>\n${safe}\n</untrusted>`;
 }
 
+/**
+ * 화자 이름 뒤에 붙이는 **덜 확실하다는 표.**
+ *
+ * `?` 하나다. 무겁게 적지 않는 데 근거가 있다 — 낱말 단위로 재면 문턱에 걸린
+ * 낱말도 다섯에 하나는 맞고, 틀린 낱말의 대부분에는 걸리지 않는다
+ * (`diarAccuracy`). "확인 필요" 같은 말을 달면 안 달린 줄이 확인된 줄처럼 읽힌다.
+ *
+ * 어느 줄에 붙이는지는 화면의 "덜 또렷" 과 같은 함수다 (`isUnsureSpeaker`).
+ */
+function speakerMark(s: { speaker: string | null } & UnsureInput): string {
+  if (!s.speaker) return "";
+  return isUnsureSpeaker(s) ? `${s.speaker}?` : s.speaker;
+}
+
 /** 요약에 넘길 전사문 한 덩어리. 화자와 표시가 있으면 살린다. */
 function transcriptText(recordingId: string): { text: string; truncated: boolean } {
   const segments = listSegments(recordingId);
@@ -1005,9 +1607,8 @@ function transcriptText(recordingId: string): { text: string; truncated: boolean
     const stamp = formatStamp(s.start);
     // 표시가 붙은 줄은 그대로 요약에 들어가면 안 되는 줄이다. 그 사실을 함께 적는다.
     const mark = s.flag ? ` [${s.flag}]` : "";
-    return s.speaker
-      ? `[${stamp}]${mark} ${s.speaker}: ${s.text}`
-      : `[${stamp}]${mark} ${s.text}`;
+    const who = speakerMark(s);
+    return who ? `[${stamp}]${mark} ${who}: ${s.text}` : `[${stamp}]${mark} ${s.text}`;
   });
   const joined = lines.join("\n");
   if (joined.length <= SUMMARY_INPUT_CHARS) return { text: joined, truncated: false };
@@ -1053,6 +1654,22 @@ const ROSTER_LIMIT = 30;
  */
 export function agentModelBrief(): AgentModelBrief {
   return modelBrief(asrModel);
+}
+
+/**
+ * 대화 몸통에 실어 보낼 화자 사실. 분리를 안 했으면 null.
+ *
+ * **다듬기와 같은 것을 보낸다.** 둘이 한 세션에서 도는데 한쪽만 화자가
+ * 소리로 갈린 것을 알면, 같은 자루 안에서 앞뒤가 안 맞는 말을 하게 된다 —
+ * 다듬기는 무리에 이름을 달아 놓고 대화는 "화자 이름은 대사만 보고 추정한
+ * 것이라 틀릴 수 있습니다" 라고 답하는 식으로. 그것이 정확히 이번 변경
+ * 전의 동작이고, 이제는 거짓말이다.
+ *
+ * 이 칸은 저쪽에서 울타리 **밖**에 실린다. 왜 그래야 하는지는 `diarFacts`
+ * 에 적어 두었다.
+ */
+export function agentDiarFacts(recordingId: string): AgentDiarFacts | null {
+  return diarFacts(recordingId, listSegments(recordingId));
 }
 
 export function chatKey(recordingId: string): string {
@@ -1136,7 +1753,7 @@ export function chatContext(recordingId: string): string {
        * 인용하면 안 되는 줄이다.
        */
       const mark = s.flag ? ` [${s.flag}]` : "";
-      return `${formatStamp(s.start)} | ${s.speaker ?? "-"}${mark} | ${s.text}`;
+      return `${formatStamp(s.start)} | ${speakerMark(s) || "-"}${mark} | ${s.text}`;
     });
   return [...head, "", ...lines].join("\n");
 }
@@ -1200,6 +1817,16 @@ export async function startSummary(
     "",
     "이런 줄이 많으면 요약 끝에 그 사실을 한 줄로 적어라 — 무엇을 못 담았는지",
     "사람이 알아야 한다.",
+    "",
+    "## 누가 말했는가",
+    "",
+    /*
+     * **손으로 적지 않는다.** `diarCaveat` 이 지금 이 녹음의 사실에서 짓는다 —
+     * 모델 이름, 나온 무리 수, `?` 가 붙은 줄 수, 파일 단위 경고. 여기 문장을
+     * 박아 두면 분리 모델을 갈아 끼우거나 분리를 못 한 녹음에서 조용히 옛말이
+     * 되고, 화자 이야기에서 옛말은 "이 이름을 믿어라" 로 읽힌다.
+     */
+    ...diarCaveat(diarFacts(recordingId, listSegments(recordingId))),
     SUMMARY_RULES,
   ].join("\n");
 

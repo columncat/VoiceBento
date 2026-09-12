@@ -1,8 +1,9 @@
-import { desc, eq, sql } from "drizzle-orm";
+import { and, desc, eq, ne, sql } from "drizzle-orm";
 
 import { db, schema } from "./db";
 import type { RecordingRow, SessionRow } from "./db/schema";
 import { env } from "./env";
+import { dedupeNames } from "./name-key";
 import type { SessionDTO } from "./types";
 import { uid } from "./uid";
 
@@ -188,6 +189,36 @@ export function countRecordings(sessionId: string): number {
   return row?.n ?? 0;
 }
 
+/**
+ * 이 세션에 붙은 녹음 가운데 **가장 최근에 적힌** 화자 목록. 없으면 빈 배열.
+ *
+ * 세션 머리말의 "이 세션에 올리기" 와 올리기 화면이 목록 칸을 **채워 보여 주는** 재료다.
+ * 반복 회의는 대개 같은 사람들이라 매번 처음부터 적게 하면 아무도 안 적고, 그러면 자동
+ * 분리를 건너뛴다. 그렇다고 말없이 물려받게 하지는 않는다 — 회차마다 참석자가 다를 수
+ * 있어, 화면이 채운 채로 보여 주고 사람이 고친 뒤에 올린다.
+ *
+ * 목록이 빈 녹음은 건너뛴다. 목록 없이 올린 회차 하나 때문에 그 앞 회차의 목록이 안
+ * 보이면 채워 줄 까닭이 사라진다. 같은 초에 올린 녹음은 넣은 순서(`rowid`)로 가른다
+ * (`listSessions` 와 같은 까닭).
+ */
+export function latestRosterOf(sessionId: string): string[] {
+  const row = db
+    .select({ roster: schema.recordings.roster })
+    .from(schema.recordings)
+    .where(and(eq(schema.recordings.sessionId, sessionId), ne(schema.recordings.roster, "[]")))
+    .orderBy(desc(schema.recordings.createdAt), desc(sql`rowid`))
+    .limit(1)
+    .get();
+  if (!row) return [];
+  try {
+    const parsed: unknown = JSON.parse(row.roster);
+    if (!Array.isArray(parsed)) return [];
+    return dedupeNames(parsed.filter((v): v is string => typeof v === "string"));
+  } catch {
+    return [];
+  }
+}
+
 export function toSessionDTO(row: SessionRow): SessionDTO {
   return {
     id: row.id,
@@ -196,6 +227,7 @@ export function toSessionDTO(row: SessionRow): SessionDTO {
     contextChars: row.contextChars,
     contextLimit: SESSION_CONTEXT_LIMIT,
     contextFull: row.contextChars >= SESSION_CONTEXT_LIMIT,
+    lastRoster: latestRosterOf(row.id),
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
   };

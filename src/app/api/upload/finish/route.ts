@@ -3,7 +3,8 @@ import { z } from "zod";
 
 import { logAgent } from "@/lib/agent-log";
 import { MemoBentoError, cancelUpload, finishUpload } from "@/lib/memobento";
-import { createRecording, withSession } from "@/lib/recording-server";
+import { createRecording, getRecordingRow, setRoster, withSession } from "@/lib/recording-server";
+import { dedupeRoster, optionalRoster } from "@/lib/roster-schema";
 import {
   MAX_SESSION_NAME,
   SessionPickError,
@@ -40,12 +41,29 @@ const bodySchema = z.object({
    */
   sessionId: z.string().trim().min(1).optional(),
   newSessionName: z.string().trim().min(1).max(MAX_SESSION_NAME).optional(),
+
+  /**
+   * 말한 사람 목록. **선택.** 적었으면 전사를 시작하기 **전에** 앉힌다.
+   *
+   * 전사가 끝나면 곧바로 자동 분리가 도는데, 그때 목록이 있어야 k = L+2 로 돈다.
+   * 올린 뒤에 적게 하면 첫 분리는 목록 없이 지나간 뒤다. 안 적었으면 자동
+   * 분리를 건너뛰고 "목록을 적으면 나눕니다" 로 남는다 (`ROSTER_MISSING`).
+   */
+  roster: optionalRoster(),
 });
 
 export async function POST(req: Request) {
   const parsed = bodySchema.safeParse(await req.json().catch(() => null));
   if (!parsed.success) {
-    return NextResponse.json({ error: "invalid body" }, { status: 400 });
+    /*
+     * 목록 칸이 틀렸으면 그 까닭을 사람 말로 준다. 파일을 다 올린 뒤라, "invalid
+     * body" 만 받으면 사람은 무엇을 고쳐 다시 올려야 할지 모른다.
+     */
+    const rosterIssue = parsed.error.issues.find((i) => i.path[0] === "roster");
+    return NextResponse.json(
+      { error: rosterIssue?.message ?? "invalid body" },
+      { status: 400 },
+    );
   }
 
   const session = await loadSession(parsed.data.uploadId);
@@ -99,11 +117,19 @@ export async function POST(req: Request) {
     sessionId: voiceSessionId,
   });
 
+  /*
+   * 목록은 **줄에 넣기 전에** 앉힌다. 순서가 바뀌면 전사가 짧은 파일에서 먼저
+   * 끝나 자동 분리가 빈 목록을 읽고 건너뛸 수 있다.
+   */
+  const roster = dedupeRoster(parsed.data.roster ?? []);
+  if (roster.length) setRoster(row.id, roster);
+
   logAgent(req, "녹음 올리기", title, {
     file: name,
     size: session.size,
     fileId,
     sessionId: voiceSessionId,
+    people: roster.length,
   });
 
   /*
@@ -114,8 +140,9 @@ export async function POST(req: Request) {
    */
   enqueue(row.id);
 
+  const after = getRecordingRow(row.id) ?? row;
   return NextResponse.json({
-    recording: withSession(row, sessionOfRecording(row)?.name ?? null),
+    recording: withSession(after, sessionOfRecording(after)?.name ?? null),
     fileId,
   });
 }

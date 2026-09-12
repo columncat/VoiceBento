@@ -159,6 +159,19 @@ function Row({ item }: { item: UploadItem }) {
             세션 · {item.sessionName}
           </div>
         )}
+        {item.roster.length > 0 && (
+          /*
+            적어 준 화자 목록도 여기 보인다. 세션과 같은 까닭이다 — 여러 개를
+            놓고 돌아왔을 때 무엇을 적었는지, 적기는 했는지 여기서 확인한다.
+            안 적었으면 전사 뒤에 화자를 안 나누므로 그 차이가 보여야 한다.
+          */
+          <div
+            className="truncate text-[10px] text-(--color-fg-4)"
+            title={item.roster.join(", ")}
+          >
+            화자 {item.roster.length}명 · {item.roster.join(", ")}
+          </div>
+        )}
         {busy && (
           <div className="mt-1 h-1 w-full overflow-hidden rounded-full bg-(--color-bg-2)">
             <div

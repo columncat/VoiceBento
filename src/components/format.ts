@@ -66,8 +66,24 @@ export function estimateTranscribe(
   seconds: number | null,
   rtf: number = TRANSCRIBE_RTF,
 ): string | null {
+  return estimateWork(seconds, rtf, TRANSCRIBE_RTF);
+}
+
+/**
+ * 실시간 대비 배수로 걸릴 시간을 어림한다. **셈은 전사나 화자 분리나 같다.**
+ *
+ * 화자 분리의 RTF 는 0.27 로 전사(0.096)의 세 배 가까이 되지만, 그 값은 여기
+ * 적지 않는다 — 서술자에서 와야 한다 (`DiarNoticeDTO.rtf`). 두 숫자가 코드에
+ * 흩어져 있으면 모델을 갈아 끼우는 날 한쪽만 바뀐다.
+ */
+export function estimateWork(
+  seconds: number | null,
+  rtf: number | null | undefined,
+  fallbackRtf: number,
+): string | null {
   if (seconds === null || !Number.isFinite(seconds) || seconds <= 0) return null;
-  const est = seconds * (Number.isFinite(rtf) && rtf > 0 ? rtf : TRANSCRIBE_RTF);
+  const use = typeof rtf === "number" && Number.isFinite(rtf) && rtf > 0 ? rtf : fallbackRtf;
+  const est = seconds * use;
   if (est < 60) return `약 ${Math.max(5, Math.round(est / 5) * 5)}초`;
   return `약 ${Math.max(1, Math.round(est / 60))}분`;
 }

@@ -16,11 +16,49 @@ export const JOB_STATES = [
   "queued",
   "extracting",
   "transcribing",
+  /**
+   * 소리를 들어 화자를 가르는 중. **전사문은 이 단계에서 이미 온전하다.**
+   *
+   * `transcribing` 에 숨기지 않는 이유: 60분짜리면 여기서 7~9분이 더 걸린다
+   * (RTF 0.12~0.28). 그동안 "전사 중" 이라고 적어 두면 진행 막대가 멎은 채로
+   * 몇 분이 흐르고, 화면이 거짓말을 하는 것이 된다. 단계 이름은 값이 싸다.
+   */
+  "diarizing",
   "polishing",
   "done",
   "failed",
 ] as const;
 export type JobState = (typeof JOB_STATES)[number];
+
+/**
+ * 화자 분리가 어디까지 갔나. **`state` 와 별개다 — 그것이 요점이다.**
+ *
+ * 분리가 어떻게 실패하든 전사문은 온전하고 `state` 는 `done` 이어야 한다.
+ * 그래서 실패는 `recordings.state` 가 아니라 여기 앉는다.
+ *
+ * - `none`    — 아직 안 했다 (옛 녹음, 또는 전사만 끝난 것).
+ * - `running` — 워커가 도는 중. 다시 뜨면 **실패로 접고 다시 안 돌린다.**
+ * - `done`    — 붙었다.
+ * - `failed`  — 못 붙였다. 이유는 `speakerError`.
+ * - `skipped` — 안 했다 (길이 상한을 넘었다 등). 거절이 아니라 건너뛴 것이다.
+ */
+export const SPEAKER_STATES = ["none", "running", "done", "failed", "skipped"] as const;
+export type SpeakerState = (typeof SPEAKER_STATES)[number];
+
+/**
+ * 이 줄의 화자를 **누가 정했나.**
+ *
+ * - `agent-guess` — 에이전트가 대사에서 추정했다. **소리를 안 들었다.**
+ *   화자 분리를 붙이기 전의 모든 줄이 이것이고, 마이그레이션이 그렇게 찍는다.
+ * - `acoustic`    — 소리로 갈랐다 (`speakerCluster`·`speakerRuns`).
+ * - `human`       — 사람이 손으로 고쳤다. 아무것도 이 위를 덮지 않는다.
+ *
+ * 이 칸이 없으면 옛 녹음의 추정 화자와 새로 소리로 가른 화자가 화면에서
+ * 똑같이 생긴 이름으로 앉는다. 근거가 다른 두 값을 같은 얼굴로 보여 주면
+ * 사람은 둘 다 같은 무게로 믿는다.
+ */
+export const SPEAKER_SOURCES = ["agent-guess", "acoustic", "human"] as const;
+export type SpeakerSource = (typeof SPEAKER_SOURCES)[number];
 
 /** 요약을 누가 썼나. 사람이 손대면 그때부터 사람의 글이다. */
 export const SUMMARY_SOURCES = ["human", "agent"] as const;
@@ -212,6 +250,33 @@ export const recordings = sqliteTable(
     /** 다듬기를 시작한 때. 기한을 넘겼는지 여기서 잰다. */
     polishStartedAt: integer("polish_started_at", { mode: "timestamp" }),
 
+    /**
+     * 사람이 적어 준 화자 목록. `["김", "이", …]` JSON. **비어 있어도 된다.**
+     *
+     * 화자 분리에 줄 무리 수가 여기서 나온다 — `k = 목록 인원 + 2`
+     * (`diar-models.ts` 의 `clusterCountFor`). 수를 아예 안 주면 진짜 회의에서
+     * 화자가 **40~134명** 나오므로 반드시 무언가를 준다 (빈 목록이면 k=3).
+     *
+     * **넉넉히 적는 쪽이 낫다.** 한 명 빠뜨리면 −8.3pt, 한 명 더 적으면
+     * +4.1pt 다 — 비대칭이 분명해서 화면 문구도 그렇게 물어야 한다
+     * (`ROSTER_HINT`).
+     *
+     * 이 칸은 **지금 값**이다. 어느 판을 돌릴 때 무엇을 썼는지는
+     * `diarizations.roster` 에 따로 찍힌다 — 사람이 나중에 목록을 고쳐도
+     * 이미 붙은 결과가 어떤 목록에서 나왔는지는 남아 있어야 한다.
+     */
+    roster: text("roster").notNull().default("[]"),
+
+    /**
+     * 화자 분리가 어디까지 갔나. **`state` 를 건드리지 않는다.**
+     *
+     * 분리가 실패해도 전사문은 온전하다. 그 사실을 지키는 자리가 이 칸이다 —
+     * 실패를 `state` 에 적으면 멀쩡한 전사문이 빨간 글씨를 달고 앉는다.
+     */
+    speakerState: text("speaker_state", { enum: SPEAKER_STATES }).notNull().default("none"),
+    /** 왜 못 붙였나. 사람이 읽는 문장. 종료 코드를 그대로 적지 않는다. */
+    speakerError: text("speaker_error"),
+
     createdAt: stamp("created_at"),
     updatedAt: stamp("updated_at"),
   },
@@ -274,8 +339,69 @@ export const segments = sqliteTable(
     /** 사람이 읽는 글. 처음에는 `raw` 와 같다. */
     text: text("text").notNull().default(""),
 
-    /** 에이전트가 대사에서 추정한 화자. 화자 분리 모델은 쓰지 않는다. */
+    /**
+     * 이 줄의 화자 **이름.**
+     *
+     * ## 소리로 가른 줄에는 이 칸이 안 쓰인다
+     *
+     * 음향 화자 분리가 내놓는 것은 이름이 아니라 **군집 번호**이고(아래
+     * `speakerCluster`), 번호에 이름을 다는 표는 녹음 하나에 하나뿐이다
+     * (`diarizations.names`). 이름을 조각마다 베껴 두면 이름 하나를 고칠 때
+     * 수천 줄을 다시 써야 하고, 그중 한 줄이라도 빠지면 화면에 두 이름이 섞인다.
+     * 그래서 읽을 때 번호 → 이름으로 푼다.
+     *
+     * 값이 남아 있는 줄은 둘이다. **에이전트가 대사에서 추정한 옛 줄**
+     * (마이그레이션이 `speakerSource = "agent-guess"` 로 찍는다)과 **사람이
+     * 손으로 적은 줄**(`"human"`). 둘 다 손대지 않는다.
+     */
     speaker: text("speaker"),
+
+    /**
+     * 소리로 가른 군집 번호. 이 조각에서 **가장 오래 말한** 군집이다.
+     *
+     * 이름이 아니라 번호인 이유는 위에 적었다. 한 조각 안에서 화자가 바뀌는
+     * 일이 흔하므로(AMI 조각의 52.2%에 정답 화자가 둘 이상) 이 값은 "대표"
+     * 일 뿐이고, 실제로 읽을 때 쓰는 것은 아래 `speakerRuns` 다.
+     */
+    speakerCluster: integer("speaker_cluster"),
+
+    /** 누가 정했나. 위 `SPEAKER_SOURCES` 를 보라. 아무도 안 정했으면 null. */
+    speakerSource: text("speaker_source", { enum: SPEAKER_SOURCES }),
+
+    /**
+     * **낱말별 화자 런.** `[{k, s, e, sil}]` JSON — 조각을 빈틈없이 덮는다.
+     *
+     * ## 왜 낱말이 아니라 토막인가
+     *
+     * 낱말마다 한 칸을 두면 AMI 9편에서 32,091줄이 되는데, 같은 군집이
+     * 잇따르는 자리를 묶으면 1,131개다 — 28배 작고 잃는 것이 없다.
+     *
+     * ## 왜 낱말 번호가 아니라 **시각**인가
+     *
+     * 낱말 시각을 안 주는 모델(`timestamps: "none"`)이 있다. 그때는 글자 수에
+     * 비례해 조각을 나누는데(68.4%, 조각 통째 61.9%보다 낫다), 그 토막은
+     * 낱말과 1:1 이 아니다. 시각으로 적어 두면 두 길이 같은 모양으로 저장되고,
+     * 화면은 제가 가진 것(낱말 시각이든 글자 수든)으로 시각을 찾아 나누면 된다.
+     *
+     * ## 왜 여기 담나 — **줄을 새로 만들지 않는다**
+     *
+     * `segments` 의 유일 색인 `(recording_id, idx)` 의 그 `idx` 가 에이전트에게
+     * 보내는 번호다. 화자가 바뀔 때마다 행을 쪼개면 번호가 흔들리고, 그러면
+     * `raw` 의 불변성도 `edited` 보호도 다듬기 계약도 함께 흔들린다.
+     *
+     * `sil` 은 그 토막의 실루엣이다. **"틀렸다" 가 아니라 "덜 확실하다" 로만**
+     * **써라** — 딴 파일에서 고른 문턱으로 정밀도 79.0% · 재현율 6.9% 다.
+     */
+    speakerRuns: text("speaker_runs").notNull().default("[]"),
+
+    /**
+     * 이 조각 으뜸 군집의 실루엣. 모르면 null.
+     *
+     * 위 런 안에도 값이 있지만 이 칸을 따로 둔다 — 줄 하나가 얼마나 미덥나를
+     * 묻는 자리(목록·요약·정렬)가 JSON 을 풀지 않고 답할 수 있어야 한다.
+     * 대부분의 조각은 런이 하나라 사실상 같은 값이다.
+     */
+    speakerSil: real("speaker_sil"),
 
     /**
      * 다듬기가 붙인 표시. 없으면 null.
@@ -336,6 +462,117 @@ export const segments = sqliteTable(
 );
 
 export type SegmentRow = typeof segments.$inferSelect;
+
+// ─────────────────────────────────────────────────────────────
+//   화자 분리 — 녹음 하나에 한 판
+// ─────────────────────────────────────────────────────────────
+
+/**
+ * 화자 분리 한 판의 결과. 녹음 하나에 하나다 (`summaries` 와 같은 결).
+ *
+ * ## 왜 `recordings` 에 칸을 더하지 않고 표를 갈랐나
+ *
+ * `turns` 가 크다. 99분짜리에서 구간 1,019개 · 34KB 였고 180분이면 그 두
+ * 배다. 그런데 목록 화면(`listRecordings`)은 `recordings` 의 **모든 칸**을
+ * 읽고 그 질의가 화면을 열 때마다 돈다. 같은 행에 두면 녹음 50건짜리 목록
+ * 한 번에 몇 MB 를 긁게 된다 — 아무도 안 보는 자료를.
+ *
+ * 대신 `speakerState`·`speakerError` 만 `recordings` 에 남겼다. 그 둘은
+ * 목록에 실제로 뜨는 값이고 작다.
+ *
+ * ## 왜 날 구간을 저장하나
+ *
+ * **문턱만 바꿔 다시 붙일 때 워커를 다시 안 돌리려는 것이다.** 붙이는 셈
+ * (`lib/diarize-assign.ts`)은 sherpa 를 안 부르는 순수 함수라 밀리초면
+ * 끝나는데, 그 앞의 분리는 21분짜리에 332~356초가 걸렸다. λ 를 바꾸거나
+ * 군집→이름 표가 달라졌다고 그 몇 분을 다시 치를 이유가 없다.
+ */
+export const diarizations = sqliteTable("diarizations", {
+  recordingId: text("recording_id")
+    .primaryKey()
+    .references(() => recordings.id, { onDelete: "cascade" }),
+
+  /** 어느 모델로 돌렸나. `scripts/diar-models.json` 의 id. */
+  modelId: text("model_id").notNull(),
+
+  /**
+   * **이 판을 돌릴 때** 사람이 적어 준 목록. `recordings.roster` 의 그때 값이다.
+   *
+   * 지금 값과 따로 두는 이유: 사람이 나중에 이름을 더하거나 고쳐도 이미
+   * 붙은 결과는 옛 목록에서 나온 것이다. 그 둘이 어긋나 보일 때 "왜 이런
+   * 결과가 나왔나" 에 답할 수 있는 유일한 자리다.
+   */
+  roster: text("roster").notNull().default("[]"),
+
+  /**
+   * 워커에게 준 무리 수 `k`. **목록 인원 + 2 다** (`clusterCountFor`).
+   *
+   * `k = L` 을 쓰면 안 된다: AMI 에서 −7.0pt·DER +8.6pt 이고, 사용자의 진짜
+   * 녹음 한 편(21분 26초, 3명)에서 k=3 이 셋째 사람의 낱말 197개를 **197개 전부**
+   * 둘째 사람에게 붙였다.
+   */
+  clusters: integer("clusters").notNull(),
+  /** 실제로 나온 군집 수. `clusters` 보다 적을 수 있다. */
+  found: integer("found").notNull().default(0),
+
+  /**
+   * 날 구간. `[{s, e, k, sil}]` JSON. **워커가 낸 그대로**(+ 실루엣을 합쳤다).
+   *
+   * 실루엣은 워커가 0.2초 미만 구간을 건너뛰므로 `null` 일 수 있다.
+   */
+  turns: text("turns").notNull().default("[]"),
+
+  /**
+   * 구간 실루엣의 중앙값. **이 녹음을 통째로 의심할 것인가**의 근거다.
+   *
+   * 문턱은 서술자가 준다 (`fileWarnSilhouetteMedian`, 지금 0.25). 파일 단위
+   * 정확도와 Spearman 0.72~0.97 로 붙어 다닌다. 원래 쓰려던 "나온 수 <
+   * 요청한 수" 는 AMI 9편에서 **0번** 울렸다 — 쓰지 마라.
+   */
+  silhouetteMedian: real("silhouette_median"),
+
+  /**
+   * 실루엣을 **왜 못 쟀나.** 쟀으면 null. 사람이 읽는 문장.
+   *
+   * `silhouetteMedian` 이 null 이면 파일 경고도 줄마다의 "덜 확실하다" 도 하나도
+   * 안 뜬다. 그 모습은 "잘 갈렸다" 와 똑같이 보인다 — 실제로는 **재지 못한**
+   * 것인데. 그래서 이유를 따로 적어 두고 화면과 에이전트가 그 사실을 말한다.
+   * 이유가 셋이라(길이 때문에 접었다 · 재다 죽었다 · 워커가 값을 안 냈다)
+   * 중앙값 칸 하나로는 가를 수 없다.
+   */
+  silhouetteNote: text("silhouette_note"),
+
+  /**
+   * 군집마다 맡은 시간. `[{k, seconds}]` JSON, **많은 순.**
+   *
+   * 에이전트에게 주는 힌트가 이 순서다 — 1등 군집이 목록의 1등 화자인 것이
+   * AMI 9편 중 8편이었다. **첫 등장 순서는 주지 마라**: 27.8~36.1% 로 찍기와
+   * 다르지 않은데 그럴듯해 보여서 에이전트가 근거로 삼는다.
+   *
+   * 이름을 나눠 줄 때도 이 순서를 쓴다 — **상위 L개에만 이름, 나머지는
+   * `other`.** 실루엣으로 고르면 목록에 적은 사람 말의 30%를 버리고 정확도가
+   * 18.6pt 깎인다.
+   */
+  talkTime: text("talk_time").notNull().default("[]"),
+
+  /**
+   * 군집 → 이름. `{"0": "김", "2": "other"}` JSON. 아직 없으면 `{}`.
+   *
+   * **에이전트가 채운다.** 음향이 말한 시간 순서만으로 이름을 맞히면
+   * 64.9%(신탁 70.6%)이고 개별 파일에서 20%까지 무너진다. 그래서 에이전트가
+   * 대사를 읽고 정하고, 여기 **표 하나로** 받는다 — 줄마다의 화자를 돌려받는
+   * 자리는 없앴다.
+   */
+  names: text("names").notNull().default("{}"),
+
+  /** 분리에 걸린 시간(ms). 다음 판을 어림할 재료. */
+  msProcess: integer("ms_process"),
+
+  createdAt: stamp("created_at"),
+  updatedAt: stamp("updated_at"),
+});
+
+export type DiarizationRow = typeof diarizations.$inferSelect;
 
 // ─────────────────────────────────────────────────────────────
 //   요약

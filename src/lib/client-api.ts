@@ -3,7 +3,9 @@ import { readJson } from "./read-json";
 import type {
   ChatHistory,
   ChatStatus,
+  DiarizationDTO,
   PolishStart,
+  RecordingDTO,
   RecordingDetailResponse,
   RecordingListResponse,
   RecordingWithSession,
@@ -67,6 +69,16 @@ import type {
  * `rollover` 를 하위 주소로 둔 것은 이 앱에 이미 같은 모양이 있어서다
  * (`/api/recordings/[id]/retranscribe`). 둘 다 "이 물건에 이 동작을 시켜라"
  * 이지 "이 칸을 이 값으로 고쳐라" 가 아니다.
+ *
+ * 화자 분리도 같은 규칙으로 주소를 둘 팠다. **동작과 값을 갈랐다:**
+ *
+ *   POST  /api/recordings/[id]/diarize  { roster } → 202 { recording }
+ *   PATCH /api/recordings/[id]/speakers { names }  → { diarization, segments }
+ *
+ * 앞엣것은 "이 녹음의 화자를 소리로 다시 나눠라" 라는 **동작**이라 몇 분이
+ * 걸리고 202 로 끝난다. 뒤엣것은 "이 목소리의 이름은 이것이다" 라는 **값**이라
+ * 곧바로 끝나고 바뀐 결과가 돌아온다. 하나로 묶으면 이름 하나 고치는 데도
+ * 워커를 돌릴지 말지를 몸통으로 판단해야 한다.
  */
 
 async function get<T>(url: string, signal?: AbortSignal): Promise<T> {
@@ -102,11 +114,13 @@ export const api = {
    * 보낼지 물어보고, 새 세션이면 그때 만들어 id 를 받아 온다. 나중에 붙이면
    * 첫 다듬기가 이미 엉뚱한 세션에서 돌아 버린다.
    */
-  create: (fileId: string, title: string, pick: SessionPick) =>
+  create: (fileId: string, title: string, pick: SessionPick, roster: string[] = []) =>
     send<{ recording: RecordingWithSession }>("/api/recordings", "POST", {
       fileId,
       title,
       ...pick,
+      // 말한 사람 목록도 **전사가 돌기 전에** 간다. 자동 분리가 그것으로 k 를 센다.
+      ...(roster.length ? { roster } : {}),
     }).then((j) => j.recording),
 
   detail: (id: string, signal?: AbortSignal) =>
@@ -141,6 +155,44 @@ export const api = {
    * 물어보며 `state` 가 도는지 본다.
    */
   retranscribe: (id: string) => send<unknown>(`/api/recordings/${enc(id)}/retranscribe`, "POST"),
+
+  // ── 화자 ────────────────────────────────────────────────
+  /**
+   * **소리로 화자를 나눈다.** 전사문은 안 건드린다.
+   *
+   * `roster` 는 사람이 적어 준 이름들이다. 화면은 이름만 보내고 **무리 수
+   * `k` 는 안 보낸다** — `k = 인원 + 2` 는 실측으로 정해진 값이라 서버가
+   * 서술자에서 정한다. 화면이 계산해 보내면 그 값이 두 곳에 살게 되고,
+   * 서술자를 고치는 날 한쪽만 바뀐다.
+   *
+   * 202 만 돌아온다. 60분짜리면 십몇 분이 걸린다 (RTF 0.27). 화면은 녹음을
+   * 다시 물어보며 `state`·`speakerState` 를 따라간다.
+   */
+  diarize: (id: string, roster: string[]) =>
+    send<{ recording: RecordingDTO }>(`/api/recordings/${enc(id)}/diarize`, "POST", { roster }),
+
+  /**
+   * 군집에 이름을 붙인다. **줄이 아니라 목소리의 이름이다.**
+   *
+   * 한 칸을 고치면 그 목소리의 모든 줄이 함께 바뀌므로 조각을 통째로 다시
+   * 받는다 — 화면이 무엇을 갈아 끼울지 스스로 셈하면 이름 표와 줄이 어긋나는
+   * 순간이 생긴다.
+   *
+   * 빈 문자열을 보내면 그 번호의 이름을 지운다 (임시 이름으로 돌아간다).
+   *
+   * **`run` 을 반드시 싣는다** — 이 초안을 만든 판(`DiarizationDTO.run`)이다. 그 사이
+   * 화자를 다시 나눴으면 번호의 뜻이 바뀌어 서버가 409 (`code: "stale-diarization"`)
+   * 로 거절한다. 화면은 새 판을 받아 초안을 다시 맞춘다.
+   */
+  speakerNames: (
+    id: string,
+    body: { run: string; names: Record<string, string>; dismissRecheck?: string[] },
+  ) =>
+    send<{ diarization: DiarizationDTO | null; segments: SegmentDTO[] }>(
+      `/api/recordings/${enc(id)}/speakers`,
+      "PATCH",
+      body,
+    ),
 
   // ── 세션 ────────────────────────────────────────────────
   sessions: {

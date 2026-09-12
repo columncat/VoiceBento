@@ -5,7 +5,7 @@ import { AlertTriangle, Check, Clock, Loader2 } from "lucide-react";
 import type { JobState, RecordingDTO } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
-import { estimateTranscribe } from "./format";
+import { estimateWork } from "./format";
 
 /**
  * "지금 무엇을 하는 중인가" 를 한 자리에서 말한다.
@@ -25,6 +25,7 @@ export const STATE_LABEL: Record<JobState, string> = {
   queued: "차례 기다리는 중",
   extracting: "오디오 뽑는 중",
   transcribing: "전사 중",
+  diarizing: "화자 나누는 중",
   polishing: "다듬는 중",
   done: "전사 끝",
   failed: "실패",
@@ -35,14 +36,26 @@ export const STATE_HINT: Record<JobState, string> = {
   queued: "앞의 전사가 끝나면 시작합니다",
   extracting: "영상에서 소리만 꺼내 16kHz 로 맞추는 중입니다",
   transcribing: "말소리를 글자로 옮기는 중입니다",
-  polishing: "에이전트가 문장을 다듬고 화자를 추정하는 중입니다",
+  /*
+   * **전사문은 이미 다 나왔다.** 그 사실을 적는 것이 이 문구의 값이다 —
+   * 60분짜리면 여기서 7~9분이 더 걸리는데, 그동안 아무 말이 없으면 사람은
+   * 아직 옮겨 적는 중인 줄 알고 기다린다.
+   */
+  diarizing: "전사문은 다 나왔습니다. 이제 누가 말했는지 소리로 가르는 중입니다",
+  polishing: "에이전트가 문장을 다듬는 중입니다",
   done: "",
   failed: "",
 };
 
 /** 아직 도는 중인가. 화면이 다시 물어볼지를 이걸로 정한다. */
 export function isBusy(state: JobState): boolean {
-  return state === "queued" || state === "extracting" || state === "transcribing" || state === "polishing";
+  return (
+    state === "queued" ||
+    state === "extracting" ||
+    state === "transcribing" ||
+    state === "diarizing" ||
+    state === "polishing"
+  );
 }
 
 /**
@@ -99,12 +112,21 @@ export function StateBadge({ state, className }: { state: JobState; className?: 
 export function JobProgress({
   recording,
   rtf,
+  diarRtf,
   className,
 }: {
   recording: RecordingDTO;
   /** 모델 서술자의 실시간 대비 배수. 걸릴 시간을 이걸로 어림한다. */
   /** 모델을 재 본 적이 없으면 null·undefined 로 온다 — 그때는 어림을 안 적는다. */
   rtf?: number | null;
+  /**
+   * 화자 분리의 실시간 대비 배수. **전사의 것과 다른 값이다** (0.27 대 0.096).
+   *
+   * 서술자에서 와야 한다 (`DiarNoticeDTO.rtf`). 여기 박아 두면 임베딩 모델을
+   * 갈아 끼우는 날 — 두 번째 칸(ERes2NetV2)은 RTF 가 4.8배다 — 이 어림만
+   * 옛말로 남고, 그때 화면은 16분이라고 적은 채 한 시간을 돌린다.
+   */
+  diarRtf?: number | null;
   className?: string;
 }) {
   if (!isBusy(recording.state)) return null;
@@ -112,10 +134,17 @@ export function JobProgress({
   const pct = hasPercent(recording)
     ? Math.max(0, Math.min(100, Math.round((recording.progress ?? 0) * 100)))
     : null;
+  /*
+   * 걸릴 시간 어림. **진행 막대는 못 그린다** — 분리 워커는 중간 산출을
+   * 안 낸다 (구간이 다 나온 뒤에 한꺼번에 온다). 그래서 도는 중이라는 것과
+   * 얼마나 걸리는지, 둘만 말한다.
+   */
   const eta =
-    recording.state === "transcribing" && typeof rtf === "number"
-      ? estimateTranscribe(recording.duration, rtf)
-      : null;
+    recording.state === "transcribing"
+      ? estimateWork(recording.duration, rtf, 0.1)
+      : recording.state === "diarizing"
+        ? estimateWork(recording.duration, diarRtf, 0.27)
+        : null;
 
   return (
     <div className={cn("flex flex-col gap-1", className)}>
@@ -153,7 +182,10 @@ export function JobProgress({
           걸릴 시간은 **어림이라고 적어** 둔다. uno 한 대에서 잰 값이고 동시에
           두 건이 돌면 그만큼 늘어난다. 정확한 척하면 지나갔을 때 고장으로 보인다.
         */}
-        {eta && ` · 전부 ${eta} 걸립니다`}
+        {eta &&
+          (recording.state === "diarizing"
+            ? ` · 이 단계에 ${eta} 걸립니다`
+            : ` · 전부 ${eta} 걸립니다`)}
       </p>
     </div>
   );

@@ -1,18 +1,26 @@
+import { existsSync } from "node:fs";
+
 import { NextResponse } from "next/server";
 import { z } from "zod";
 
 import { advancePolish } from "@/lib/agent";
 import { logAgent } from "@/lib/agent-log";
+import { OTHER_SPEAKER, ROSTER_HINT, diarAttribution } from "@/lib/diar-models";
 import { MODEL_NOTICE } from "@/lib/model";
+import { diarModel, diarPaths } from "@/lib/env";
 import {
   deleteRecording,
+  getDiarizationRow,
   getRecordingRow,
+  getRoster,
   listSegments,
   parseNotice,
   renameRecording,
   setRecordingSession,
+  toDiarizationDTO,
   withSession,
 } from "@/lib/recording-server";
+import type { DiarNoticeDTO } from "@/lib/types";
 import {
   MAX_SESSION_NAME,
   createSession,
@@ -60,6 +68,7 @@ export async function GET(
   }
 
   const session = sessionOfRecording(row);
+  const diar = getDiarizationRow(id);
   return NextResponse.json({
     recording: withSession(row, session?.name ?? null),
     segments: listSegments(id),
@@ -67,7 +76,66 @@ export async function GET(
     polishError: row.polishError,
     session: session ? toSessionDTO(session) : null,
     model: MODEL_NOTICE,
+    /*
+     * 화자 분리 한 판. 안 했으면 null.
+     *
+     * **날 구간은 여기 안 실린다** (`toDiarizationDTO`) — 99분짜리에서 34KB
+     * 이고 화면이 쓸 것이 없다. 줄마다의 화자는 이미 `segments` 안에 있다.
+     *
+     * 의심 문턱(`fileWarnSilhouetteMedian`)은 **서버가 판단해서** 준다.
+     * 이 눈금은 임베딩 모델마다 다른 값이라, 화면이 손으로 든 숫자를 쓰면
+     * 모델을 갈아 끼우는 날 조용히 옛말이 된다.
+     */
+    diarization: diar ? toDiarizationDTO(diar, diarModel.fileWarnSilhouetteMedian) : null,
+    /*
+     * 화자 분리 **기능 자체**의 안내. 녹음마다 다르지 않은 값들이다.
+     *
+     * 화면이 이것을 가장 필요로 하는 때는 `diarization` 이 **없을 때**다 —
+     * 아직 한 번도 안 나눈 녹음에 목록 칸을 그리고, 얼마나 걸릴지 적고,
+     * 너무 길면 미리 말해야 한다. 그래서 저 칸에 얹지 않고 따로 싣는다.
+     *
+     * 숫자와 문구를 전부 서술자에서 뜬다. 화면이 제 손으로 "0.27" 이나
+     * "180분" 을 들면 모델을 갈아 끼우는 날 여기만 옛말이 된다.
+     */
+    diar: diarNotice(),
+    /*
+     * 지금 적혀 있는 화자 목록. `diarization.roster` 와 **다르다** — 저쪽은
+     * 그때 그 판을 돌릴 때 쓴 목록이다. 분리가 건너뛰어져 `diarization` 이
+     * 아예 없을 때도 사람이 적어 둔 이름은 화면에 남아야 한다.
+     */
+    roster: getRoster(id),
   });
+}
+
+/**
+ * 화자 분리 서술자를 화면 모양으로. **출처 고지를 여기서 싣는다.**
+ *
+ * 분할 모델이 MIT 이고 MIT 는 저작권 표시를 함께 실을 것을 요구한다
+ * (`Copyright (c) 2022 CNRS`). 화면에 그 글자가 없으면 라이선스를 안 지킨
+ * 것이다 — 이 저장소는 공개이고 `/voice` 는 hosted service 다.
+ */
+function diarNotice(): DiarNoticeDTO {
+  return {
+    modelId: diarModel.id,
+    name: diarModel.name,
+    rtf: diarModel.rtf,
+    maxAudioSeconds: diarModel.runtime.maxAudioSeconds,
+    rosterHint: ROSTER_HINT,
+    otherLabel: OTHER_SPEAKER,
+    warnSilhouette: diarModel.fileWarnSilhouetteMedian,
+    /*
+     * 줄마다의 "덜 또렷" 문턱. 에이전트의 `?` 와 같은 값이다 — 화면이 제 손으로
+     * 눈금을 지으면 둘이 다른 줄을 가리킨다 (`lib/speaker-doubt.ts`).
+     */
+    unsureSilhouette: diarModel.wordSilhouette?.flagAt ?? null,
+    attribution: diarAttribution(diarModel),
+    /*
+     * 모델 파일이 볼륨에 있나. **뜰 때 한 번이 아니라 물어볼 때마다 본다** —
+     * `scripts/fetch-model.mjs` 가 앱이 뜬 뒤에 받아 앉히는 길이 있어서,
+     * 한 번 캐 두면 "아직 없습니다" 가 영영 남는다.
+     */
+    ready: existsSync(diarPaths.seg) && existsSync(diarPaths.emb),
+  };
 }
 
 /**
@@ -147,6 +215,7 @@ export async function PATCH(
   });
 
   const session = sessionOfRecording(row);
+  const diar = getDiarizationRow(id);
   return NextResponse.json({
     recording: withSession(row, session?.name ?? null),
     session: session ? toSessionDTO(session) : null,

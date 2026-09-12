@@ -14,9 +14,33 @@ export type JobState =
   | "queued"
   | "extracting"
   | "transcribing"
+  /**
+   * 소리를 들어 화자를 가르는 중. **전사문은 이미 온전하다.**
+   *
+   * 계약에 값을 하나 더한 것이라 가볍게 볼 일이 아니다. 그래도 더한 이유:
+   * 60분짜리면 여기서 7~9분이 더 걸리는데 그동안 `transcribing` 이라고 적으면
+   * 진행 막대가 멎은 채로 몇 분이 흐른다. 화면이 거짓말을 하는 것보다 값을
+   * 하나 더 아는 편이 낫다. `db/schema.ts` 의 `JOB_STATES` 와 **같아야 한다.**
+   */
+  | "diarizing"
   | "polishing"
   | "done"
   | "failed";
+
+/** 화자 분리가 어디까지 갔나. `state` 와 별개다 — `db/schema.ts` 의 설명을 보라. */
+export type SpeakerState = "none" | "running" | "done" | "failed" | "skipped";
+
+/** 이 줄의 화자를 누가 정했나. `agent-guess` 는 **소리를 안 들은** 추정이다. */
+export type SpeakerSource = "agent-guess" | "acoustic" | "human";
+
+/** 한 조각 안에서 "여기부터 여기까지는 군집 k". 시각은 전체 기준 초. */
+export interface SpeakerRunDTO {
+  k: number;
+  s: number;
+  e: number;
+  /** 실루엣. **"틀렸다" 가 아니라 "덜 확실하다" 로만 쓴다.** 모르면 null. */
+  sil: number | null;
+}
 
 export interface SegmentDTO {
   id: string;
@@ -27,7 +51,14 @@ export interface SegmentDTO {
   raw: string;
   /** 사람이 읽는 글. 에이전트가 다듬었거나 사람이 고친 것. */
   text: string;
-  /** 에이전트가 대사에서 추정한 화자. 없으면 null. */
+  /**
+   * 이 줄의 화자 이름. 없으면 null.
+   *
+   * **소리로 가른 줄에서는 서버가 군집 번호를 이름으로 풀어 여기 담아 준다**
+   * (`diarizations.names`, 아직 이름이 없으면 "화자 1" 같은 임시 이름).
+   * 화면은 예전과 똑같이 이 칸만 읽으면 된다 — 무엇을 근거로 붙은 이름인지는
+   * 아래 `speakerSource` 가 말한다.
+   */
   speaker: string | null;
   /**
    * 낱말별 시각. `[{ w, t }]` — 낱말 클릭에 쓴다.
@@ -53,6 +84,48 @@ export interface SegmentDTO {
    * - `cut-off` — 조각 끝에서 말이 잘렸다. 다음 줄로 이어진다.
    */
   flag?: "other-language" | "hallucinated" | "unclear" | "cut-off" | null;
+
+  /*
+   * ── 아래 넷은 화자 분리가 붙인 것. 전부 **선택 사항**이다. ───────────
+   *
+   * 계약의 세 모양은 칸을 늘리지 않기로 한 자리라 선택으로만 더한다. 옛
+   * 녹음과 분리를 못 한 녹음에는 이 칸들이 아예 없고, 그때 화면은 예전처럼
+   * `speaker` 한 칸으로 그리면 된다.
+   */
+
+  /**
+   * 이 이름을 누가 정했나. **`agent-guess` 는 소리를 안 들은 추정이다.**
+   *
+   * 화면은 이 둘을 같은 얼굴로 그리면 안 된다. 근거가 다른 값을 나란히
+   * 놓으면 사람은 둘 다 같은 무게로 믿는다.
+   */
+  speakerSource?: SpeakerSource | null;
+
+  /** 소리로 가른 군집 번호 (이 조각에서 가장 오래 말한 것). 이름이 아니다. */
+  speakerCluster?: number | null;
+
+  /**
+   * **한 줄 안에서 화자가 바뀌는 자리.** 비어 있으면 줄 통째로 한 사람이다.
+   *
+   * 왜 이것이 필요한가: AMI 9편에서 VAD 조각의 **52.2%**에 정답 화자가 둘
+   * 이상 들어 있었다. 줄 통째로 한 사람을 붙이면 낱말 정확도가 61.9% 인데
+   * 이 토막으로 나누면 73.5% 다. 화면이 이걸 안 쓰면 그 차이가 버려진다.
+   *
+   * 토막은 조각의 [start, end] 를 **빈틈없이** 덮는다. 낱말 시각이 있으면
+   * 낱말을 시각으로 나눠 담고, 없으면(`ModelNoticeDTO.timestamps === "none"`)
+   * 글자 수에 비례해 나눠 담으면 된다 — 저장된 모양이 둘 다 같다.
+   */
+  speakerRuns?: SpeakerRunDTO[];
+
+  /**
+   * 이 줄 으뜸 군집의 실루엣. 모르면 null.
+   *
+   * **"덜 확실하다" 까지만 말해라.** 낱말 단위로 재면 문턱(−0.2)에 걸린 낱말의
+   * 정밀도 80.4% · 재현율 7.7% 다 — 다섯에 하나는 멀쩡하고 틀린 낱말의 대부분에는
+   * 표시가 없다. 줄 단위로는 잰 적이 없다. 어느 줄에 표시할지는 화면과 서버가
+   * `lib/speaker-doubt.ts` 한 곳에서 정한다.
+   */
+  speakerSil?: number | null;
 }
 
 export interface RecordingDTO {
@@ -189,6 +262,14 @@ export interface SessionDTO {
   contextLimit: number;
   /** 상한을 넘어 더 못 붓는 상태. 화면이 **미리** 알려 줄 재료. */
   contextFull: boolean;
+  /**
+   * 이 세션에 붙은 녹음 가운데 **가장 최근에 적힌 화자 목록.** 없으면 빈 배열.
+   *
+   * 반복 회의에 이어 올릴 때 목록 칸을 **채워서 보여 주는** 재료다. 말없이 물려받게
+   * 하지 않는다 — 회차마다 참석자가 다를 수 있어, 화면이 채운 채로 사람에게 보이고
+   * 사람이 고친 뒤에 올린다.
+   */
+  lastRoster: string[];
   createdAt: string;
   updatedAt: string;
 }
@@ -207,6 +288,77 @@ export interface SessionDTO {
 export interface RecordingWithSession extends RecordingDTO {
   sessionId: string | null;
   sessionName: string | null;
+
+  /**
+   * 화자 분리가 어디까지 갔나. **`state` 와 별개다.**
+   *
+   * 분리가 어떻게 실패하든 전사문은 온전하고 `state` 는 `done` 이다. 그래서
+   * 실패는 여기 앉는다 — 화면은 이 둘을 따로 그려야 한다. 분리가 실패한
+   * 녹음을 "실패" 로 그리면 멀쩡히 읽히는 전사문에 빨간 글씨가 붙는다.
+   */
+  speakerState: SpeakerState;
+  /** 왜 못 붙였나. 사람이 읽는 문장. 없으면 null. */
+  speakerError: string | null;
+}
+
+/**
+ * 화자 분리 한 판. **날 구간(`turns`)은 안 싣는다** — 화면이 쓸 것이 없다.
+ *
+ * 저장은 해 둔다 (`diarizations.turns`). 문턱만 바꿔 다시 붙일 때 7분짜리
+ * 워커를 다시 안 돌리려는 것이고, 그건 서버 안에서만 쓰인다.
+ */
+export interface DiarizationDTO {
+  /** 어느 모델로 돌렸나. */
+  modelId: string;
+  /** 이 판을 돌릴 때 사람이 적어 준 목록. */
+  roster: string[];
+  /** 워커에게 준 무리 수 `k` (= 목록 인원 + 2). */
+  clusters: number;
+  /** 실제로 나온 군집 수. */
+  found: number;
+  /** 군집마다 맡은 시간 (초), **많은 순.** 이름을 나눠 줄 때 쓰는 순서다. */
+  talkTime: { k: number; seconds: number }[];
+  /** 군집 → 이름. 에이전트가 채운다. 아직 없으면 빈 객체. */
+  names: Record<string, string>;
+  /** 구간 실루엣의 중앙값. 모르면 null. */
+  silhouetteMedian: number | null;
+  /**
+   * 이 녹음을 통째로 의심해야 하나 (`silhouetteMedian ≤ 문턱`).
+   *
+   * **서버가 판단해서 준다.** 문턱은 임베딩 모델마다 다른 값이라
+   * (`fileWarnSilhouetteMedian`) 화면이 손으로 든 숫자를 쓰면 모델을 갈아
+   * 끼우는 날 옛말이 된다.
+   */
+  lowConfidence: boolean;
+  /**
+   * 화자 신뢰도(실루엣)를 **재지 못했다면** 그 이유. 쟀으면 null.
+   *
+   * `lowConfidence: false` 와 뜻이 전혀 다르다. 저쪽은 "재 보니 괜찮다" 이고
+   * 이쪽은 "재지 못해 모른다" 다. 이 칸이 서 있으면 파일 경고도 줄마다의
+   * "덜 확실하다" 도 **붙을 수가 없는** 판이라, 화면은 표시가 없는 것을 "확실하다"
+   * 로 읽히지 않게 이 사실을 따로 말해야 한다.
+   */
+  silhouetteMissing: string | null;
+  /**
+   * 다시 나누면서 **어느 목소리인지 뚜렷하게 짝짓지 못해 옮기지 못한, 사람이 붙인 이름.**
+   *
+   * 이름은 번호가 아니라 목소리에 붙은 것이라 다시 나눌 때 겹친 시간으로 옮긴다.
+   * 두 목소리가 한 군집으로 합쳐지거나 한 목소리가 반반으로 갈리면 어느 쪽에
+   * 줘도 남의 이름이 되므로 안 옮기고 여기 남긴다. **조용히 사라지면 안 된다** —
+   * 화면이 "다시 확인해 주세요" 로 띄운다. 사람이 이름 표를 저장하면 비워진다.
+   */
+  recheckNames: string[];
+  /** 언제 돌렸나. ISO. */
+  at: string;
+  /**
+   * 이 판의 **군집 번호가 무엇을 뜻하나**를 가리키는 표지 (`diarRunId`).
+   *
+   * 이름 표를 저장할 때 **반드시 함께 보낸다** (`PATCH …/speakers`). 번호의 뜻은 판마다
+   * 바뀌므로, 화면이 들고 있던 초안이 옛 판의 것이면 서버가 409 로 거절한다 — 그러지
+   * 않으면 옛 번호의 이름이 새 판의 **다른 목소리**에 사람의 것으로 잠겨 앉는다.
+   * `at` 과 다르다: 저쪽은 이름만 저장해도 바뀐다.
+   */
+  run: string;
 }
 
 /** `GET /api/recordings` */
@@ -236,6 +388,84 @@ export interface RecordingDetailResponse {
    * 낱말 클릭을 켤지 접을지 판단할 근거가 없다.
    */
   model: ModelNoticeDTO;
+
+  /**
+   * 계약 밖. 이 녹음의 화자 분리 한 판. 안 했으면 null.
+   *
+   * **선택 칸이다.** 이 봉투를 만드는 라우트를 아직 안 고친 단계에서도
+   * 타입이 깨지지 않아야 한다 — 깨지면 고치는 사람이 급한 마음에 값을
+   * 지어내 채운다.
+   */
+  diarization?: DiarizationDTO | null;
+
+  /**
+   * 계약 밖. **화자 분리 기능 자체**에 대한 고정 안내. 녹음마다 다르지 않다.
+   *
+   * `ModelNoticeDTO` 와 같은 결이다 — 화면이 손으로 든 숫자를 쓰지 않게
+   * 하려고 서버가 서술자에서 떠서 보낸다. 여기 실리는 것 넷이 다 그런 값이다:
+   * 기다림을 어림할 `rtf`, "너무 길다" 를 미리 말할 `maxAudioSeconds`,
+   * 목록을 어떻게 물어야 하는지(`rosterHint`), 그리고 **출처 고지**.
+   * 고지는 장식이 아니라 의무다 (분할 모델이 MIT 라 저작권 표시를 실어야 한다).
+   */
+  diar?: DiarNoticeDTO | null;
+
+  /**
+   * 계약 밖. 이 녹음에 적혀 있는 화자 목록. 아직 안 적었으면 빈 배열.
+   *
+   * `diarization.roster` 와 다르다 — 저쪽은 **그때 그 판을 돌릴 때** 쓴
+   * 목록이고 이것은 지금 적혀 있는 것이다. 분리가 실패하거나 건너뛰어
+   * `diarization` 자체가 없을 때도 사람이 적어 둔 이름은 남아야 한다.
+   */
+  roster?: string[];
+}
+
+/**
+ * 화자 분리 기능에 대한 고정 안내. **녹음마다 다른 값이 아니다.**
+ *
+ * 왜 `DiarizationDTO` 에 안 넣었나: 저쪽은 "이 녹음을 이렇게 나눴다" 는
+ * 한 판의 기록이라 분리를 한 번도 안 한 녹음에는 없다. 그런데 화면이 이
+ * 값들을 **가장 필요로 하는 때가 바로 그때**다 — 아직 안 나눈 녹음에
+ * 목록 칸을 그리고, 얼마나 걸릴지 적고, 너무 길면 미리 말해야 한다.
+ */
+export interface DiarNoticeDTO {
+  /** 서술자 id (`scripts/diar-models.json`). */
+  modelId: string;
+  /** 사람이 읽는 모델 이름. */
+  name: string;
+  /** 실시간 대비 처리 시간. 화면이 "몇 분 걸립니다" 를 적는 데 쓴다. */
+  rtf: number | null;
+  /** 이보다 긴 소리는 안 나눈다 (초). */
+  maxAudioSeconds: number;
+  /** 목록을 어떻게 물어야 하는가. **"모르면 넉넉히 적으세요"** 가 여기 있다. */
+  rosterHint: string;
+  /** 목록에 없던 사람에게 붙는 이름. 화면이 이 글자를 지어내면 안 된다. */
+  otherLabel: string;
+  /**
+   * 이 녹음을 통째로 의심할 실루엣 문턱 (`fileWarnSilhouetteMedian`).
+   *
+   * 파일 단위 판단은 서버가 이미 해서 `DiarizationDTO.lowConfidence` 로 준다.
+   * **줄 단위 표시에는 쓰지 않는다** — 파일 중앙값에 대해 잰 눈금이라 낱말에
+   * 걸면 표시 13.6% · 정밀도 63.2% 로 뜻이 달라진다. 줄에는 아래 `unsureSilhouette`.
+   */
+  warnSilhouette: number;
+  /**
+   * 줄마다 "덜 확실하다" 를 붙일 **낱말 실루엣 문턱** (`wordSilhouette.flagAt`). 모르면 null.
+   *
+   * 에이전트의 `?` 와 **같은 값·같은 규칙**이다 (`lib/speaker-doubt.ts`). 화면이
+   * 제 손으로 눈금을 지으면 사람이 대화창에서 "`?` 붙은 줄" 을 물었을 때
+   * 에이전트가 짚는 줄과 화면의 표시가 달라진다. null 이면 이 모델의 실력을
+   * 재 두지 않았다는 뜻이고, 그때는 아무 줄에도 표시하지 않는다.
+   */
+  unsureSilhouette: number | null;
+  /** 출처 고지. **의무다.** 화면 어딘가에 그대로 적는다. */
+  attribution: string;
+  /**
+   * 모델 파일이 준비돼 있나.
+   *
+   * 없으면 단추를 눌러도 건너뛴다 (`whyNotDiarize`). 그 사실을 미리 말하지
+   * 않으면 사람은 눌러 보고 몇 분 기다린 뒤에야 안다.
+   */
+  ready: boolean;
 }
 
 /** `GET /api/sessions` */

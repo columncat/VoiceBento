@@ -1,0 +1,214 @@
+{
+  "$comment": [
+    "화자 분리 모델 서술자 — **이 앱에서 분리 모델의 성질을 적어 두는 유일한 자리다.**",
+    "옆의 asr-models.json 과 같은 결이고, 같은 이유로 scripts/ 에 있다:",
+    "런타임 이미지에 파일로 복사되는 것이 scripts/ 뿐이라 (Dockerfile 의",
+    "`COPY --from=builder /app/scripts ./scripts`) 워커와 내려받기 스크립트가 읽을 수 있다.",
+    "여기 있는 것은 사실뿐이고, 그 사실로 만드는 문장과 '왜' 는 src/lib/diar-models.ts 에 있다.",
+    "JSON 이라 주석을 못 다는 대신 이 칸에 적는다. 읽는 쪽은 이 키를 무시한다.",
+    "",
+    "## 왜 파일 목록(files)과 모델 목록(models)이 갈라져 있나",
+    "분리는 모델 **두 개**가 한 판이다 — 어디서 누가 말했는지 자르는 분할 모델과,",
+    "그 토막이 누구인지 재는 임베딩 모델. 그런데 실제로 갈아 끼울 수 있는 것은 임베딩뿐이다:",
+    "분할은 MIT 판이 하나뿐이고(Reverb 계열은 아래 라이선스 칸을 보라), 임베딩은 두 칸이",
+    "실제로 있다. 그래서 파일의 사실(해시·주소·라이선스)은 files 에 한 벌만 적고 models 가",
+    "이름으로 가리킨다. 두 서술자에 분할 모델의 sha256 을 두 벌로 적어 두면 언젠가 한쪽만",
+    "고치고, 그날 검사는 '통과했다' 고 하면서 서로 다른 파일을 가리킨다."
+  ],
+
+  "default": "pyannote3-campplus",
+
+  "files": {
+    "pyannote-segmentation-3-0": {
+      "$comment": [
+        "sha256 은 2026-09-11 에 uno 에서 실제로 받아 계산한 값이다. 묶음과 그 안의 파일",
+        "**둘 다** 적는다 — 묶음 해시는 내려받기가 온전했는지, 안의 해시는 우리가 폴더에",
+        "앉힌 것이 정말 그 파일인지를 본다. 앞의 것만 보면 tar 이 엉뚱한 멤버를 꺼내도 모른다.",
+        "묶음에는 model.int8.onnx(1,540,506B) 도 들어 있지만 쓰지 않는다 — fp32 로 잰 값이",
+        "설계의 근거이고, 6MB 짜리를 양자화해 아끼는 4.5MB 는 값이 없다."
+      ],
+      "name": "pyannote-segmentation-3-0.onnx",
+      "size": 5992913,
+      "sha256": "220ad67ca923bef2fa91f2390c786097bf305bceb5e261d4af67b38e938e1079",
+      "license": "MIT",
+      "credit": {
+        "weights": "pyannote/segmentation-3.0",
+        "weightsLicense": "MIT",
+        "copyright": "Copyright (c) 2022 CNRS",
+        "export": "sherpa-onnx",
+        "exportLicense": "Apache-2.0"
+      },
+      "download": {
+        "kind": "archive",
+        "url": "https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-segmentation-models/sherpa-onnx-pyannote-segmentation-3-0.tar.bz2",
+        "size": 6958444,
+        "sha256": "24615ee884c897d9d2ba09bb4d30da6bb1b15e685065962db5b02e76e4996488",
+        "member": "sherpa-onnx-pyannote-segmentation-3-0/model.onnx"
+      }
+    },
+
+    "campplus-zh-en-common-advanced": {
+      "$comment": [
+        "릴리스 태그 이름의 `recongition` 은 오타가 아니라 **실제 철자**다. 위 저장소가",
+        "그렇게 올려 두었고 고치면 404 다. 눈에 거슬린다고 손대지 마라.",
+        "이 파일은 묶음이 아니라 .onnx 하나로 배포된다 — 그래서 kind 가 direct 이고,",
+        "받는 파일이 곧 쓰는 파일이라 크기·해시를 따로 적지 않는다 (위 name/size/sha256 이 그것이다)."
+      ],
+      "name": "3dspeaker_speech_campplus_sv_zh_en_16k-common_advanced.onnx",
+      "size": 28281164,
+      "sha256": "aa3cfc16963a10586a9393f5035d6d6b57e98d358b347f80c2a30bf4f00ceba2",
+      "license": "Apache-2.0",
+      "credit": {
+        "weights": "3D-Speaker speech_campplus_sv_zh_en_16k-common_advanced",
+        "weightsLicense": "Apache-2.0",
+        "export": "sherpa-onnx",
+        "exportLicense": "Apache-2.0"
+      },
+      "download": {
+        "kind": "direct",
+        "url": "https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/3dspeaker_speech_campplus_sv_zh_en_16k-common_advanced.onnx"
+      }
+    },
+
+    "eres2netv2-zh-cn-common": {
+      "$comment": [
+        "**기본이 아니다.** 여기 있는 이유는 두 가지 — 서술자 하나를 더하는 것으로 다른",
+        "임베딩이 실제로 붙는지 확인하는 자리이고, 정확도가 모자란 녹음에서 바꿔 볼 칸이다.",
+        "RTF 가 CAM++ 의 4.8배라 한 스레드에서는 실시간보다 느리다. uno 는 물리 4코어이고",
+        "그 넷을 전사 워커가 이미 쓴다 — 기본으로 두면 한 시간짜리 녹음이 한 시간 넘게 걸린다."
+      ],
+      "name": "3dspeaker_speech_eres2netv2_sv_zh-cn_16k-common.onnx",
+      "size": 71441526,
+      "sha256": "bf1a75b9930474cf3389ef415e6e5d38ca96fea4a3a00f7e301d080a58ee2239",
+      "license": "Apache-2.0",
+      "credit": {
+        "weights": "3D-Speaker speech_eres2netv2_sv_zh-cn_16k-common",
+        "weightsLicense": "Apache-2.0",
+        "export": "sherpa-onnx",
+        "exportLicense": "Apache-2.0"
+      },
+      "download": {
+        "kind": "direct",
+        "url": "https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/3dspeaker_speech_eres2netv2_sv_zh-cn_16k-common.onnx"
+      }
+    }
+  },
+
+  "models": {
+    "pyannote3-campplus": {
+      "id": "pyannote3-campplus",
+      "name": "pyannote-segmentation-3.0 + CAM++ (3D-Speaker)",
+
+      "segmentationFile": "pyannote-segmentation-3-0",
+      "embeddingFile": "campplus-zh-en-common-advanced",
+
+      "runtime": {
+        "id": "pyannote3-campplus",
+        "sampleRate": 16000,
+        "defaultThreads": 4,
+        "windowShiftRatio": 0.1,
+        "minDurationOn": 0.3,
+        "minDurationOff": 0.5,
+        "clusterMargin": 2,
+        "maxAudioSeconds": 10800
+      },
+
+      "embeddingDim": 192,
+      "rtf": 0.27,
+
+      "memory": { "mbPerMinute": 10.5, "mbBase": 114, "budgetMb": 2100 },
+
+      "fileWarnSilhouetteMedian": 0.25,
+      "wordSilhouette": {
+        "$comment": [
+          "**낱말 단위로 잰 값이다. 줄 단위로는 잰 적이 없다.** AMI 9편 · 낱말 31,839개.",
+          "flagAt 은 화면의 '덜 또렷' 과 에이전트의 `?` 가 함께 쓰는 문턱이다 (src/lib/speaker-doubt.ts).",
+          "precision·recall·flagRate 는 **그 문턱(−0.2)에서** 잰 값이라 문턱과 짝이 맞는다.",
+          "한 편씩 빼고 고른 문턱(편마다 −0.175~−0.319)으로 재면 79.0%·6.9%·2.3% 로 거의 같다 — 과적합이 아니라는 확인이다."
+        ],
+        "auc": 0.801,
+        "flagAt": -0.2,
+        "precision": 0.804,
+        "recall": 0.077,
+        "flagRate": 0.025
+      },
+      "switchPenalty": 0.3,
+
+      "agentNotes": [
+        "화자 번호는 소리로 갈라 붙인 것이라 누구인지는 모른다. 이름은 사람이 적어 준 목록에서 고른다. 목록에 없는 사람은 other 다.",
+        "말한 시간이 긴 무리부터 순서대로 준다. 대개 1등 무리가 목록의 1등 화자다(AMI 9편 중 8편). 힌트일 뿐이니 대사와 어긋나면 대사를 믿어라.",
+        "이름 뒤 ? 는 덜 확실하다는 뜻이지 틀렸다는 뜻이 아니다. 낱말 단위로 재면 그 문턱에 걸린 낱말도 다섯에 하나는 맞았고, 줄 단위로는 잰 적이 없다. ? 줄을 누구의 말도 아니라고 지우지 마라.",
+        "줄마다 화자를 고쳐 돌려줄 수 없다. 고칠 것이 있으면 무리 번호에 붙일 이름을 바꿔라."
+      ],
+
+      "attribution": "화자 분리: pyannote/segmentation-3.0 (MIT, Copyright (c) 2022 CNRS) + 3D-Speaker CAM++ (Apache-2.0), sherpa-onnx 로 내보낸 판본 (Apache-2.0)."
+    },
+
+    "pyannote3-eres2netv2": {
+      "$comment": [
+        "**아직 아무도 이것을 쓰지 않는다.** 서술자 하나를 더하는 것으로 다른 임베딩이",
+        "실제로 붙는지 확인하는 자리다. 갈아 끼울 때 바뀌는 것은 embeddingFile 과",
+        "embeddingDim 과 rtf 뿐이고, 분할·군집·메모리 값은 그대로다 — 분할 모델이 같으니까.",
+        "",
+        "rtf 와 memory 는 **실측이 아니라 CAM++ 값에서 미룬 것이다.** rtf 는 4.8배(실측",
+        "비율)를 곱했고, memory 는 파일이 43MB 더 크니 mbBase 에 그만큼 얹었다. 실제로 쓸",
+        "날이 오면 60·90·120분을 다시 재서 이 두 칸을 고쳐라. 미룬 값을 실측인 척 두지 않으려고",
+        "여기 적어 둔다.",
+        "",
+        "fileWarnSilhouetteMedian 을 그대로 둔 것은 게으름이다. 실루엣 값의 눈금은 임베딩",
+        "모델마다 다르므로 이 문턱은 **CAM++ 에서 잰 것**이고 이 모델에서는 검증되지 않았다."
+      ],
+
+      "id": "pyannote3-eres2netv2",
+      "name": "pyannote-segmentation-3.0 + ERes2NetV2 (3D-Speaker)",
+
+      "segmentationFile": "pyannote-segmentation-3-0",
+      "embeddingFile": "eres2netv2-zh-cn-common",
+
+      "runtime": {
+        "id": "pyannote3-eres2netv2",
+        "sampleRate": 16000,
+        "defaultThreads": 4,
+        "windowShiftRatio": 0.1,
+        "minDurationOn": 0.3,
+        "minDurationOff": 0.5,
+        "clusterMargin": 2,
+        "maxAudioSeconds": 10800
+      },
+
+      "embeddingDim": 192,
+      "rtf": 1.3,
+
+      "memory": { "mbPerMinute": 10.5, "mbBase": 157, "budgetMb": 2200 },
+
+      "fileWarnSilhouetteMedian": 0.25,
+      "wordSilhouette": null,
+      "switchPenalty": 0.3,
+
+      "agentNotes": [
+        "화자 번호는 소리로 갈라 붙인 것이라 누구인지는 모른다. 이름은 사람이 적어 준 목록에서 고른다. 목록에 없는 사람은 other 다.",
+        "말한 시간이 긴 무리부터 순서대로 준다. 대개 1등 무리가 목록의 1등 화자다(AMI 9편 중 8편). 힌트일 뿐이니 대사와 어긋나면 대사를 믿어라.",
+        "줄마다 화자를 고쳐 돌려줄 수 없다. 고칠 것이 있으면 무리 번호에 붙일 이름을 바꿔라."
+      ],
+
+      "attribution": "화자 분리: pyannote/segmentation-3.0 (MIT, Copyright (c) 2022 CNRS) + 3D-Speaker ERes2NetV2 (Apache-2.0), sherpa-onnx 로 내보낸 판본 (Apache-2.0)."
+    }
+  },
+
+  "licenseAllowlist": {
+    "$comment": [
+      "**이 저장소는 공개이고 /voice 는 hosted service 다.** 그 둘이 겹치는 자리에서",
+      "라이선스는 고지의 문제가 아니라 쓸 수 있는가의 문제가 된다.",
+      "",
+      "실제로 걸린 것이 있다 — Reverb 계열 분리 모델(Rev). 정확도는 더 좋지만 Rev",
+      "Non-Production License 가 hosted service 를 **금지한다.** bento.columncat.cc/voice 가",
+      "정확히 그것이고, 저장소가 공개라 '우리끼리 쓴다' 로 넘어갈 수도 없다. 그래서 안 쓴다.",
+      "",
+      "이것을 주석으로만 적어 두면 다음에 모델을 고르는 사람이 정확도 표만 보고 다시 고른다.",
+      "그래서 허용 목록을 두고 뜰 때 검사한다 (src/lib/diar-models.ts 의 assertDiarModel).",
+      "여기 없는 라이선스의 파일을 서술자에 적으면 **앱이 안 뜬다.** 새 라이선스를 더하려면",
+      "hosted service 와 공개 저장소에서 정말 되는지 확인한 뒤에 이 줄을 고쳐라."
+    ],
+    "allowed": ["MIT", "Apache-2.0", "BSD-3-Clause", "CC-BY-4.0"]
+  }
+}

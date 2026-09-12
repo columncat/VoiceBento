@@ -1,12 +1,14 @@
 "use client";
 
-import { FolderPlus, Layers, Search, Upload, X } from "lucide-react";
-import { useMemo, useRef, useState } from "react";
+import { FolderPlus, Layers, Search, Upload, Users, X } from "lucide-react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
+import { ROSTER_HINT } from "@/lib/diar-models";
 import type { SessionDTO } from "@/lib/types";
 import { cn, formatRelativeTime } from "@/lib/utils";
 
 import { formatBytes } from "./format";
+import { RosterInput } from "./roster-input";
 import { titleFromFilename } from "./upload-queue";
 
 /**
@@ -36,8 +38,30 @@ import { titleFromFilename } from "./upload-queue";
  * 그래서 **되돌릴 수 있는 쪽**을 기본값으로 둔다.
  *
  * 대신 이어 붙이는 길을 가깝게 만든다: 기존 세션은 최근 순으로 위에 있고,
- * 목록 화면의 세션 머리말에는 "이 세션에 올리기" 가 따로 있어 여기까지
- * 오지 않아도 된다.
+ * 목록 화면의 세션 머리말에는 "이 세션에 올리기" 가 따로 있어 **세션을 고르는
+ * 걸음은** 건너뛴다 (`fixedSessionId`). 그 길에서도 이 상자가 뜨고 목록 칸만
+ * 묻는다 — 예전에는 목록 칸까지 건너뛰어, 반복 회의에 권하는 바로 그 길로 올린
+ * 녹음이 늘 분리를 건너뛰었다.
+ *
+ * ## 말한 사람 목록도 **여기서** 받는다 (선택)
+ *
+ * 전사가 끝나면 곧바로 자동 분리가 돈다. 그때 목록이 있어야 k = 인원 + 2 로
+ * 돌고, 없으면 분리를 건너뛴다 — 목록 없이 돌리면 k 를 셀 근거가 없어 틀린
+ * 화자 표시를 몇 분 들여 만들게 된다(`ROSTER_MISSING`). 올린 뒤에 적게 하면 첫
+ * 분리는 이미 지나간 뒤다. 그래서 세션과 같은 자리, 같은 때에 묻는다.
+ *
+ * **선택 칸이다.** 모르면 비워 두고 올리면 된다. 전사문은 그대로 나오고, 나중에
+ * 전사문 화면의 "화자" 에서 적으면 그때 나눈다. 올리기를 목록 때문에 막지 않는다.
+ * 문구는 서술자의 `ROSTER_HINT` 한 곳에서 온다 — "모르면 넉넉히 적으세요".
+ *
+ * ## 기존 세션이면 **지난 목록을 채워 보여 준다** — 말없이 물려받지 않는다
+ *
+ * 반복 회의는 대개 같은 사람들이다. 매번 빈 칸에서 시작하면 적는 사람이 줄고, 그러면
+ * 자동 분리가 건너뛰어진다. 그래서 기존 세션을 고르면(또는 세션 머리말에서 왔으면) 그
+ * 세션의 가장 최근 목록(`SessionDTO.lastRoster`)을 칸에 **채워 둔다.** 다만 서버가
+ * 몰래 물려받게 하지 않고 **화면에 채워 보여 준다** — 이번 회차에 빠진 사람이나 새로 온
+ * 사람이 있을 수 있고, 그걸 아는 것은 사람뿐이다. 사람이 칸을 한 번이라도 고치면 그 뒤로
+ * 세션을 바꿔도 덮지 않는다.
  */
 
 export type UploadTarget = { kind: "new"; name: string } | { kind: "existing"; id: string };
@@ -52,12 +76,18 @@ export function SessionPicker({
   files,
   sessions,
   notice,
+  fixedSessionId,
   onCancel,
   onConfirm,
   className,
 }: {
   files: File[];
   sessions: SessionDTO[];
+  /**
+   * 목적지가 **이미 정해진** 올리기 (세션 머리말의 "이 세션에 올리기"). 주면 세션
+   * 고르기를 접고 목록 칸만 묻는다. 그 세션이 목록에 없으면(그새 지워졌으면) 평소처럼 묻는다.
+   */
+  fixedSessionId?: string | null;
   /**
    * 모델 안내(무엇을 알아듣는가). **이 상자 안에 들어와야 한다.**
    *
@@ -68,9 +98,48 @@ export function SessionPicker({
    */
   notice?: React.ReactNode;
   onCancel: () => void;
-  onConfirm: (target: UploadTarget) => void;
+  /** 고른 세션과 적어 준 화자 목록(비었으면 자동 분리를 건너뛴다). */
+  onConfirm: (target: UploadTarget, roster: string[]) => void;
   className?: string;
 }) {
+  const fixed = fixedSessionId ? (sessions.find((s) => s.id === fixedSessionId) ?? null) : null;
+  const [roster, setRoster] = useState<string[]>(() => fixed?.lastRoster ?? []);
+  /** 목록 칸을 사람이 손댔나. 안 댔을 때만 고른 세션의 지난 목록으로 다시 채운다. */
+  const [rosterTouched, setRosterTouched] = useState(false);
+  /** 지금 칸에 든 목록을 어느 세션에서 채웠나. 사람에게 "채워 두었습니다" 를 말할 근거. */
+  const [filledFrom, setFilledFrom] = useState<string | null>(() =>
+    fixed?.lastRoster?.length ? fixed.name : null,
+  );
+  const sectionRef = useRef<HTMLElement | null>(null);
+
+  /** 사람이 안 고친 칸이면 이 세션의 지난 목록으로 채운다. 새 세션이면 비운다. */
+  const fillFrom = (s: SessionDTO | null) => {
+    if (rosterTouched) return;
+    const last = s?.lastRoster ?? [];
+    setRoster(last);
+    setFilledFrom(s && last.length ? s.name : null);
+  };
+
+  /*
+   * 세션 머리말에서 왔으면 이 상자가 **화면 위쪽**에 뜬다. 머리말은 목록 아래쪽에 있을 수
+   * 있어, 눌러도 아무 일이 안 난 것처럼 보이지 않게 상자로 데려간다. 상자가 열린 채
+   * 다른 세션의 머리말을 누르면 그 세션의 목록으로 다시 채운다 (손대지 않았다면).
+   */
+  useEffect(() => {
+    sectionRef.current?.scrollIntoView({ block: "nearest", behavior: "smooth" });
+    if (fixed) fillFrom(fixed);
+    // `fixed` 는 매번 새로 찾은 객체라 id 로만 따라간다.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [fixedSessionId]);
+
+  const pickNew = () => {
+    if (pickedId !== null) fillFrom(null);
+    setPickedId(null);
+  };
+  const pickExisting = (id: string) => {
+    setPickedId(id);
+    fillFrom(sessions.find((s) => s.id === id) ?? null);
+  };
   /*
    * 기본 이름은 첫 파일 이름에서 확장자를 뗀 것.
    *
@@ -99,20 +168,25 @@ export function SessionPicker({
     return ordered.filter((s) => s.name.toLowerCase().includes(q)).slice(0, 20);
   }, [ordered, query]);
 
-  const canConfirm = pickedId !== null || name.trim().length > 0;
+  const canConfirm = fixed !== null || pickedId !== null || name.trim().length > 0;
 
   const confirm = () => {
+    if (fixed) {
+      onConfirm({ kind: "existing", id: fixed.id }, roster);
+      return;
+    }
     if (pickedId !== null) {
-      onConfirm({ kind: "existing", id: pickedId });
+      onConfirm({ kind: "existing", id: pickedId }, roster);
       return;
     }
     const next = name.trim();
     if (!next) return;
-    onConfirm({ kind: "new", name: next });
+    onConfirm({ kind: "new", name: next }, roster);
   };
 
   return (
     <section
+      ref={sectionRef}
       className={cn(
         "flex flex-col gap-3 rounded-[var(--radius-card)] bg-(--color-surface) p-5 ring-1 ring-(--color-accent)/35",
         className,
@@ -129,7 +203,9 @@ export function SessionPicker({
         <div className="flex min-w-0 items-start gap-2.5">
           <Layers className="mt-0.5 h-4 w-4 shrink-0 text-(--color-accent)" />
           <div className="min-w-0">
-            <h2 className="text-sm text-(--color-fg)">이 파일들을 어느 세션에 넣을까요</h2>
+            <h2 className="text-sm text-(--color-fg)">
+              {fixed ? `“${fixed.name}” 세션에 올립니다` : "이 파일들을 어느 세션에 넣을까요"}
+            </h2>
             <p className="text-[11px] break-keep text-(--color-fg-4)">
               {files.length}개 · {formatBytes(totalSize)} — 같은 세션에 넣으면 다듬기·대화·요약이
               지난 녹음의 화자 이름과 용어를 물려받습니다.
@@ -165,6 +241,8 @@ export function SessionPicker({
         )}
       </ul>
 
+      {/* 세션 머리말에서 왔으면 세션은 이미 정해졌다. 고르는 칸을 접고 목록만 묻는다. */}
+      {!fixed && (
       <div className="flex flex-col gap-2">
         {/* ── 새 세션 (기본값) ───────────────────────────── */}
         <label
@@ -179,7 +257,7 @@ export function SessionPicker({
             type="radio"
             name="voice-session-target"
             checked={pickedId === null}
-            onChange={() => setPickedId(null)}
+            onChange={pickNew}
             className="mt-1 accent-(--color-accent)"
           />
           <span className="min-w-0 flex-1">
@@ -192,9 +270,9 @@ export function SessionPicker({
                 const c = (e.nativeEvent as InputEvent).isComposing;
                 if (typeof c === "boolean") composing.current = c;
                 setName(e.target.value);
-                setPickedId(null);
+                pickNew();
               }}
-              onFocus={() => setPickedId(null)}
+              onFocus={pickNew}
               onCompositionStart={() => {
                 composing.current = true;
               }}
@@ -269,7 +347,7 @@ export function SessionPicker({
                         type="radio"
                         name="voice-session-target"
                         checked={pickedId === s.id}
-                        onChange={() => setPickedId(s.id)}
+                        onChange={() => pickExisting(s.id)}
                         className="accent-(--color-accent)"
                       />
                       <span className="min-w-0 flex-1 truncate text-[12.5px] text-(--color-fg-2)">
@@ -292,6 +370,41 @@ export function SessionPicker({
             )}
           </div>
         )}
+      </div>
+      )}
+
+      {/* ── 말한 사람 (선택) ─────────────────────────────── */}
+      <div className="flex flex-col gap-1.5 rounded-lg bg-(--color-bg-2) p-2.5 ring-1 ring-(--color-border-soft)">
+        <span className="flex items-center gap-1.5 text-[12.5px] text-(--color-fg-2)">
+          <Users className="h-3.5 w-3.5 shrink-0 text-(--color-accent-strong)" />
+          말한 사람 <span className="text-[11px] text-(--color-fg-4)">(선택)</span>
+        </span>
+        <p className="text-[11px] leading-relaxed break-keep text-(--color-fg-4)">
+          {ROSTER_HINT}{" "}
+          {roster.length === 0
+            ? "비워 두면 전사만 하고 화자는 나누지 않습니다 — 나중에 전사문에서 적으면 그때 나눕니다."
+            : files.length > 1
+              ? `올리는 ${files.length}개 모두에 이 목록을 씁니다.`
+              : "전사가 끝나면 이 목록으로 화자를 나눕니다."}
+        </p>
+        {filledFrom && !rosterTouched && roster.length > 0 && (
+          /*
+            채운 목록이라는 것을 **말한다.** 말없이 채워 두면 사람은 지난 회차의 목록이
+            이번 녹음에 그대로 쓰인다는 것을 모른 채 올린다 — 빠진 사람이 있으면 k 가
+            어긋나고, 온 적 없는 사람 이름이 에이전트의 닫힌 집합에 들어간다.
+          */
+          <p className="text-[11px] leading-relaxed break-keep text-(--color-accent-strong)">
+            “{filledFrom}” 의 지난 녹음에 적었던 목록을 채워 두었습니다 — 이번에 말한 사람에 맞게
+            빼거나 더하세요.
+          </p>
+        )}
+        <RosterInput
+          value={roster}
+          onChange={(next) => {
+            setRoster(next);
+            setRosterTouched(true);
+          }}
+        />
       </div>
 
       {notice}

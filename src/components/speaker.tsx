@@ -2,15 +2,27 @@
 
 import { useMemo } from "react";
 
-import type { SegmentDTO } from "@/lib/types";
+import { clusterName, placeholderNames } from "@/lib/diarize-assign";
+import type { DiarizationDTO, SegmentDTO, SpeakerSource } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
 /**
  * 화자를 눈으로 가르는 법.
  *
- * 화자 이름은 에이전트가 **대사에서 추정한 것**이다. 화자 분리 모델을 쓰지
- * 않으므로 틀릴 수 있고, 그래서 이름은 늘 글자로 보여야 한다 — 색 점만 있고
- * 이름이 없으면 틀린 것을 알아챌 수도, 고칠 수도 없다.
+ * ## 이름이 어디서 왔는지가 이 파일의 절반이다
+ *
+ * 한 전사문 안에 **근거가 다른 이름 셋**이 섞일 수 있다 (`speakerSource`):
+ *
+ * - `acoustic` — 소리로 갈랐다. 목소리를 재서 무리를 짓고, 그 무리에 이름을
+ *   붙인 것이다. 누가 말했는지는 소리가 정하고 **이름만** 사람/에이전트가 단다.
+ * - `agent-guess` — 소리를 **안 들은** 추정이다. 화자 분리가 생기기 전에
+ *   올린 녹음에 남아 있다. 에이전트가 대사의 흐름만 보고 지은 이름이다.
+ * - `human` — 사람이 그 줄에서 직접 고쳤다.
+ *
+ * **이 셋을 같은 얼굴로 그리면 안 된다.** 근거가 다른 값을 나란히 놓으면
+ * 사람은 둘 다 같은 무게로 믿는다. 그래서 이름은 늘 글자로 보이고
+ * (색 점만 있으면 틀린 것을 알아챌 수도, 고칠 수도 없다), 무엇을 근거로
+ * 붙은 이름인지는 아래 `SpeakerLegend` 가 한 번 적어 준다.
  *
  * ## 색만으로 나누지 않는다
  *
@@ -78,17 +90,68 @@ export function speakerStyle(index: number, name: string): SpeakerStyle {
   };
 }
 
-/** 전사문에 나온 순서대로 화자에게 번호를 매긴다. */
-export function useSpeakerStyles(segments: SegmentDTO[]): Map<string, SpeakerStyle> {
+/**
+ * 전사문에 나온 순서대로 화자에게 번호를 매긴다.
+ *
+ * `namer` 가 있으면 **줄 안에서 화자가 바뀌는 자리**(`speakerRuns`)의 이름도
+ * 함께 거둔다. 그것이 없으면 한 줄에만 나오는 둘째 화자가 팔레트에서 빠져
+ * 색 없이 그려진다 — AMI 조각의 52.2%에 화자가 둘 이상이었으니 드문 일이
+ * 아니다.
+ */
+export function useSpeakerStyles(
+  segments: SegmentDTO[],
+  namer?: ClusterNamer,
+): Map<string, SpeakerStyle> {
   return useMemo(() => {
     const map = new Map<string, SpeakerStyle>();
-    for (const s of segments) {
-      const name = s.speaker?.trim();
-      if (!name || map.has(name)) continue;
+    const add = (raw: string | null | undefined) => {
+      const name = raw?.trim();
+      if (!name || map.has(name)) return;
       map.set(name, speakerStyle(map.size, name));
+    };
+    for (const s of segments) {
+      add(s.speaker);
+      if (namer) for (const r of s.speakerRuns ?? []) add(namer(r.k));
     }
     return map;
-  }, [segments]);
+  }, [segments, namer]);
+}
+
+// ─────────────────────────────────────────────────────────────
+//   군집 번호 → 이름
+// ─────────────────────────────────────────────────────────────
+
+/** 군집 번호를 화면에 적을 이름으로. 모르면 null. */
+export type ClusterNamer = (k: number | null) => string | null;
+
+/**
+ * 줄 안의 토막(`speakerRuns`)에는 **번호만** 있고 이름이 없다.
+ *
+ * 서버는 조각의 으뜸 군집 하나만 이름으로 풀어 `speaker` 에 담아 준다
+ * (`speakerNamer`). 토막마다 이름을 실으면 조각 수천 줄에 같은 글자가
+ * 되풀이되므로 그게 맞는 판단인데, 대신 화면이 나머지를 풀 수 있어야 한다.
+ *
+ * 푸는 규칙은 서버와 **같은 것을 쓴다** — `diarize-assign.ts` 의
+ * `placeholderNames`·`clusterName` 을 그대로 부른다. 화면이 제 손으로
+ * "화자 N" 을 지으면 서버가 푼 이름과 어긋나는 날이 오고, 그때 같은 목소리가
+ * 줄마다 다른 이름으로 앉는다.
+ *
+ * `otherLabel` 은 서술자에서 온 글자다 (`DiarNoticeDTO.otherLabel`). 화면이
+ * 지어내지 않는다.
+ */
+export function makeClusterNamer(
+  diar: DiarizationDTO | null | undefined,
+  otherLabel: string,
+): ClusterNamer {
+  if (!diar) return () => null;
+  const order = diar.talkTime.map((t) => t.k);
+  const fallback = placeholderNames(order, diar.roster.length, otherLabel);
+  const names: Record<number, string> = {};
+  for (const [k, v] of Object.entries(diar.names)) {
+    const n = Number(k);
+    if (Number.isInteger(n) && typeof v === "string" && v.trim()) names[n] = v;
+  }
+  return (k) => clusterName(k, names, fallback);
 }
 
 /** 줄 앞에 붙는 화자 이름표. */
@@ -138,9 +201,19 @@ export function SpeakerTag({
  */
 export function SpeakerLegend({
   styles,
+  source,
   className,
 }: {
   styles: Map<string, SpeakerStyle>;
+  /**
+   * 이 전사문의 이름이 **어디서 왔나.** 줄마다 다를 수 있어 으뜸을 하나 받는다.
+   *
+   * 한 문장으로 적는 값이 아니다 — 소리로 가른 것과 대사에서 추정한 것은
+   * 믿을 근거가 전혀 다르다. 예전에는 여기 "에이전트가 대사에서 추정한
+   * 이름입니다" 가 **박혀 있었고**, 소리로 가르기 시작한 날 그 말이 거짓이
+   * 되었다. 그래서 값에서 문구가 나오게 한다.
+   */
+  source: SpeakerSource | null;
   className?: string;
 }) {
   if (styles.size === 0) return null;
@@ -161,10 +234,43 @@ export function SpeakerLegend({
           <SpeakerTag name={name} style={s} />
         </span>
       ))}
+      {/*
+        무엇을 근거로 붙은 이름인지 **여기 한 번** 적는다. 줄마다 적으면
+        읽는 데 방해가 되고, 아예 안 적으면 사람이 두 근거를 같은 무게로 믿는다.
+      */}
       <span className="text-[10.5px] break-keep text-(--color-fg-4)">
-        {/* 추정이라는 것을 여기 한 번 적어 둔다. 줄마다 적으면 읽는 데 방해가 된다. */}
-        에이전트가 대사에서 추정한 이름입니다. 줄에서 고칠 수 있습니다.
+        {source === "acoustic"
+          ? "목소리를 재서 가른 이름입니다. 이름 자체는 위 “화자” 에서 목소리마다 고칠 수 있고, 한 줄만 다르면 그 줄에서 고치세요."
+          : source === "agent-guess"
+            ? "소리를 듣지 않고 대사의 흐름만 보고 지은 이름입니다. 위 “화자” 에서 소리로 다시 나눌 수 있습니다."
+            : "사람이 직접 적은 이름입니다."}
       </span>
     </div>
   );
+}
+
+/**
+ * 이 전사문의 이름이 주로 어디서 왔나. 줄들을 세어 **가장 많은 것**을 고른다.
+ *
+ * 섞여 있을 수 있다 — 소리로 가른 전사문에서 사람이 몇 줄을 고치면 그 줄만
+ * `human` 이다. 그때 "사람이 적은 이름입니다" 라고 적으면 나머지 수백 줄에
+ * 대해 거짓말이 된다. 많은 쪽이 그 전사문의 성격이다.
+ */
+export function dominantSpeakerSource(segments: SegmentDTO[]): SpeakerSource | null {
+  const count: Record<string, number> = {};
+  for (const s of segments) {
+    if (!s.speaker?.trim()) continue;
+    // 옛 녹음에는 이 칸이 아예 없다. 그때의 이름은 다듬기가 지은 것이다.
+    const src = s.speakerSource ?? "agent-guess";
+    count[src] = (count[src] ?? 0) + 1;
+  }
+  let best: SpeakerSource | null = null;
+  let bestN = 0;
+  for (const [k, n] of Object.entries(count)) {
+    if (n > bestN) {
+      bestN = n;
+      best = k as SpeakerSource;
+    }
+  }
+  return best;
 }

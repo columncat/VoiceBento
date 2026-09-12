@@ -95,7 +95,11 @@ RUN chmod +x /usr/local/bin/docker-entrypoint.sh
 # 영속 디렉터리 (compose 볼륨으로 마운트).
 #   data/         — SQLite
 #   data/work/    — 전사하는 동안의 임시 파일. 끝나면 지운다.
-#   data/models/  — 전사 모델 671MB. **이미지에 굽지 않는다** (그러면 1.7GB 다).
+#   data/models/  — 전사 모델 671MB + 화자 분리 모델 34.3MB(분할 6.0MB +
+#                   임베딩 28.3MB). **이미지에 굽지 않는다** (그러면 1.7GB 다).
+#                   분리 모델만 굽는 것도 안 한다 — 34MB 는 싸지만 그러면
+#                   모델이 사는 자리가 둘이 되고, 어느 쪽이 진짜인지 묻는
+#                   자리가 코드에 하나 더 생긴다.
 # /config 는 스택의 컨테이너들이 함께 보는 자리 — 여기서는 읽기만 한다.
 RUN mkdir -p /app/data/work /app/data/models /config && chown -R nodejs:nodejs /app /config
 USER nodejs

@@ -108,6 +108,8 @@ export function RecordingList({
   const [grouped, setGrouped] = useState(true);
   /** 어디로 보낼지 아직 안 정한 파일들. 정해지기 전에는 전송이 시작되지 않는다. */
   const [pending, setPending] = useState<File[] | null>(null);
+  /** 세션 머리말에서 온 파일이면 그 세션. 그때는 세션을 안 묻고 목록만 묻는다. */
+  const [pendingTarget, setPendingTarget] = useState<string | null>(null);
   const errorTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   /**
    * 목록 응답이 세션까지 실어 주는가.
@@ -231,13 +233,19 @@ export function RecordingList({
     setPending((prev) => (prev ? [...prev, ...files] : files));
   };
 
-  /** 목적지가 이미 정해진 자리(세션 머리말)에서 온 파일. 묻지 않는다. */
-  const uploadInto = (files: File[], sessionId: string, sessionName: string | null) => {
-    enqueueUploads(files, sessionId, sessionName);
-    setQueueOpen(true);
+  /**
+   * 목적지가 이미 정해진 자리(세션 머리말)에서 온 파일. **세션은 안 묻고 목록만 묻는다.**
+   *
+   * 예전에는 곧바로 올렸다. 그러면 반복 회의에 권하는 바로 그 길로 올린 녹음은 목록이
+   * 늘 비어 자동 분리를 건너뛰었다 (`ROSTER_MISSING`). 목록 칸에는 그 세션의 가장 최근
+   * 목록이 채워져 뜬다 — 말없이 물려받게 하지 않는 것은 회차마다 참석자가 다를 수 있어서다.
+   */
+  const uploadInto = (files: File[], sessionId: string) => {
+    setPending((prev) => (prev ? [...prev, ...files] : files));
+    setPendingTarget(sessionId);
   };
 
-  const confirmTarget = async (target: UploadTarget) => {
+  const confirmTarget = async (target: UploadTarget, roster: string[]) => {
     const files = pending;
     if (!files || files.length === 0) {
       setPending(null);
@@ -260,7 +268,9 @@ export function RecordingList({
           : target.name;
 
       setPending(null);
-      enqueueUploads(files, id, name);
+      setPendingTarget(null);
+      // 목록은 이 묶음의 파일 모두에 간다. 한꺼번에 놓은 파일은 거의 언제나 한 자리의 것이다.
+      enqueueUploads(files, id, name, roster);
       setQueueOpen(true);
       void loadSessions();
     } catch (e) {
@@ -495,8 +505,12 @@ export function RecordingList({
             sessions={sessions}
             // 올리기 직전이 이 안내가 가장 필요한 순간이다. 상자와 함께 사라지면 안 된다.
             notice={<LanguageLine cap={cap} />}
-            onCancel={() => setPending(null)}
-            onConfirm={(t) => void confirmTarget(t)}
+            fixedSessionId={pendingTarget}
+            onCancel={() => {
+              setPending(null);
+              setPendingTarget(null);
+            }}
+            onConfirm={(t, roster) => void confirmTarget(t, roster)}
           />
         ) : (
           <section className="flex flex-col gap-3 rounded-[var(--radius-card)] bg-(--color-surface) p-5 ring-1 ring-(--color-border-soft)">
@@ -550,9 +564,7 @@ export function RecordingList({
                   count={g.recordings.length}
                   onRename={onRenameSession}
                   onDelete={onDeleteSession}
-                  onUploadHere={(files, id) =>
-                    uploadInto(files, id, sessionName.get(id) ?? null)
-                  }
+                  onUploadHere={(files, id) => uploadInto(files, id)}
                   onReject={(m) => fail(new Error(m))}
                 />
 

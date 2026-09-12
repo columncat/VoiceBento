@@ -1,14 +1,27 @@
 "use client";
 
-import { Check, Pencil, Undo2, X } from "lucide-react";
+import { Check, Pencil, Undo2, Users, X } from "lucide-react";
 import { memo, useEffect, useMemo, useRef, useState } from "react";
 
+import { isUnsureLine } from "@/lib/speaker-doubt";
 import type { SegmentDTO } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
 import { formatClock } from "./format";
 import { SegmentFlagBadge, SegmentFlagNote, normalizeFlag } from "./segment-flag";
-import { SpeakerTag, type SpeakerStyle } from "./speaker";
+import { SpeakerTag, type ClusterNamer, type SpeakerStyle } from "./speaker";
+import {
+  DoubtMark,
+  DoubtNote,
+  doubtLevel,
+  splitByRuns,
+  /*
+   * 낱말 모양은 **한 군데서만** 정의한다. 여기와 `speaker-runs.tsx` 에 따로
+   * 두면 한쪽에 칸을 더하는 날 조용히 갈라진다 — 그리고 그 둘은 같은 배열을
+   * 주고받는다.
+   */
+  type Word,
+} from "./speaker-runs";
 
 /**
  * 전사문 한 줄. VAD 가 자른 조각 하나다 (길어야 30초).
@@ -44,11 +57,17 @@ import { SpeakerTag, type SpeakerStyle } from "./speaker";
  * 부호와 대소문자만 손댄 흔한 경우가 여기 든다.
  */
 
-interface Word {
-  w: string;
-  /** 전체 기준 초. */
-  t: number;
-}
+/**
+ * ## 한 줄 안에서 화자가 바뀌면 그것이 보여야 한다
+ *
+ * VAD 조각의 절반 남짓(AMI 9편에서 52.2%)에 화자가 둘 이상이다. 줄 통째로
+ * 한 사람을 붙이면 낱말 정확도가 61.9% 인데 줄 안을 나누면 73.5% 다 — 서버가
+ * 이미 `speakerRuns` 로 나눠 보내므로 **화면이 그리기만 하면 된다.** 안 그리면
+ * 그 차이가 통째로 버려진다.
+ *
+ * 그릴 때는 토막마다 **제 이름표와 제 왼쪽 선**을 준다. 글 속에 이름을 끼워
+ * 넣기만 하면 줄바꿈이 일어나는 순간 어디부터 누구인지가 사라진다.
+ */
 
 /**
  * 보이는 글을 낱말로 쪼개고 각 낱말에 시각을 붙인다.
@@ -90,6 +109,20 @@ export interface SegmentRowProps {
   speakerListId: string;
   /** 낱말을 눌러 그 시각으로 갈 수 있나. 모델 서술자에서 온다. */
   wordClick: boolean;
+  /**
+   * 줄 안 토막의 군집 번호를 이름으로 푸는 함수. 분리를 안 했으면 null.
+   *
+   * **`useMemo` 로 만든 것을 내려보내야 한다.** 그리기마다 새 함수를 만들면
+   * 이 `memo` 가 매번 깨져서, 200줄짜리 전사문이 초당 몇 번씩 다시 그려진다.
+   */
+  namer: ClusterNamer | null;
+  /** 이름 → 색·선 모양. 토막의 이름표를 칠하는 데 쓴다. */
+  styles: Map<string, SpeakerStyle>;
+  /**
+   * "덜 확실하다" 문턱 (`DiarNoticeDTO.unsureSilhouette`). 모르면 null — 아무 줄에도 안 붙인다.
+   * 에이전트의 `?` 와 같은 값이다.
+   */
+  unsureAt: number | null;
   onSeek: (t: number) => void;
   onSave: (id: string, patch: { text?: string; speaker?: string | null }) => Promise<void>;
 }
@@ -101,6 +134,9 @@ export const SegmentRow = memo(function SegmentRow({
   time,
   speakerListId,
   wordClick,
+  namer,
+  styles,
+  unsureAt,
   onSeek,
   onSave,
 }: SegmentRowProps) {
@@ -108,6 +144,8 @@ export const SegmentRow = memo(function SegmentRow({
   const [draft, setDraft] = useState(segment.text);
   const [draftSpeaker, setDraftSpeaker] = useState(segment.speaker ?? "");
   const [saving, setSaving] = useState(false);
+  /** "덜 확실하다" 표시를 눌렀나. 줄마다 따로 연다. */
+  const [doubtOpen, setDoubtOpen] = useState(false);
   const textRef = useRef<HTMLTextAreaElement | null>(null);
   const composing = useRef(false);
   /** Esc 로 접었나. 접을 때 나는 blur 가 저장으로 새지 않게 하는 문지기. */
@@ -115,21 +153,62 @@ export const SegmentRow = memo(function SegmentRow({
 
   const flag = useMemo(() => normalizeFlag(segment), [segment]);
 
+  /*
+   * 낱말은 **낱말 클릭을 못 켜는 모델에서도** 뽑는다.
+   *
+   * 예전에는 `wordClick` 이 꺼져 있으면 아예 안 뽑았다. 이제는 줄 안을 화자
+   * 토막으로 나누는 데 이것이 필요하다 — `timestamps: "none"` 모델에서도
+   * 글자 수로 나누면 낱말 정확도 68.4% 가 남는다 (줄 통째 61.9% 보다 낫다).
+   * `wordClick` 은 이제 "뽑을까" 가 아니라 "눌러서 갈 수 있나" 만 정한다.
+   */
   const words = useMemo(
-    () => (wordClick ? alignWords(segment.text, segment.words, segment.start) : []),
-    [wordClick, segment.text, segment.words, segment.start],
+    () => alignWords(segment.text, segment.words, segment.start),
+    [segment.text, segment.words, segment.start],
   );
+
+  /**
+   * 줄 안에서 화자가 바뀌는 토막들. 한 사람이 다 말한 줄이면 빈 배열.
+   *
+   * **사람이 고친 줄은 안 나눈다.** 그 줄의 토막은 소리가 가른 지난 판의
+   * 것인데, 사람은 "이 줄은 통째로 저 사람" 이라고 말한 것이다. 그대로 두면
+   * 사람이 적은 이름은 위에 서고 줄 안에는 소리가 고른 다른 이름 둘이 서서,
+   * 한 줄이 제 이름을 세 개 갖는다. (`editSegment` 는 군집 번호만 지우고
+   * 토막은 남긴다 — 다시 나눌 때 쓸 재료라 남기는 것이 맞다.)
+   */
+  const human = segment.speakerSource === "human";
+  const chunks = useMemo(
+    () => (human ? [] : splitByRuns(words, segment.speakerRuns, segment.words.length > 0)),
+    [human, words, segment.speakerRuns, segment.words.length],
+  );
+
+  /**
+   * "덜 확실하다". **줄을 고르는 규칙은 에이전트의 `?` 와 같은 함수다** (`isUnsureLine`).
+   *
+   * 토막이 여럿으로 그려지면 토막마다 따로 붙인다(아래 `SpeakerChunk`). 그런데
+   * 낱말이 하나도 안 떨어진 토막은 화면에서 사라지므로, 그 토막 때문에 에이전트가
+   * `?` 를 붙인 줄이 화면에서는 아무 표시도 없을 수 있다. 그때는 줄 머리에 붙인다 —
+   * 사람이 "`?` 붙은 줄" 을 물었을 때 둘이 **같은 줄**을 가리켜야 한다.
+   *
+   * 사람이 고친 줄에는 안 붙인다. 그 실루엣은 **소리가 골랐던 이름**이 얼마나
+   * 또렷했나를 잰 값이고, 그 이름은 이미 사람이 갈아 치웠다 (`isUnsureLine` 이
+   * `acoustic` 줄만 본다).
+   */
+  const lineUnsure = !human && isUnsureLine(segment, unsureAt);
+  const chunkFlagged = chunks.some((c) => doubtLevel(c.sil, unsureAt) > 0);
+  const doubt: 0 | 1 = lineUnsure && !(chunks.length > 1 && chunkFlagged) ? 1 : 0;
 
   /** 지금 읽고 있는 낱말. 재생 중인 줄에서만 센다. */
   const activeWord = useMemo(() => {
-    if (time === null || words.length === 0) return -1;
+    // 낱말 시각이 없는 모델에서는 세지 않는다. 그때 `words` 의 `t` 는 전부
+    // 줄 머리라, 세어 봐야 첫 낱말 하나가 줄 내내 켜져 있을 뿐이다.
+    if (time === null || !wordClick || words.length === 0) return -1;
     let hit = -1;
     for (let i = 0; i < words.length; i++) {
       if (words[i].t <= time + 0.05) hit = i;
       else break;
     }
     return hit;
-  }, [time, words]);
+  }, [time, words, wordClick]);
 
   useEffect(() => {
     if (editing) {
@@ -179,13 +258,28 @@ export const SegmentRow = memo(function SegmentRow({
     }, 0);
   };
 
-  const rail = speaker
-    ? {
-        borderLeftColor: speaker.color,
-        borderLeftStyle: speaker.lineStyle,
-        borderLeftWidth: speaker.lineWidth,
-      }
-    : { borderLeftColor: "var(--color-border-soft)", borderLeftStyle: "solid" as const, borderLeftWidth: 3 };
+  const neutralRail = {
+    borderLeftColor: "var(--color-border-soft)",
+    borderLeftStyle: "solid" as const,
+    borderLeftWidth: 3,
+  };
+  /*
+   * 바깥 왼쪽 선.
+   *
+   * **토막이 여럿이면 중립으로 둔다.** 그 줄에는 사람이 여럿인데 바깥 선이
+   * 한 사람의 색을 띠고 있으면, 안쪽 토막 선들과 싸우면서 "이 줄은 결국
+   * 이 사람 것" 이라고 말해 버린다. 안쪽이 진짜를 말하므로 바깥은 비운다.
+   */
+  const rail =
+    chunks.length > 1
+      ? neutralRail
+      : speaker
+        ? {
+            borderLeftColor: speaker.color,
+            borderLeftStyle: speaker.lineStyle,
+            borderLeftWidth: speaker.lineWidth,
+          }
+        : neutralRail;
 
   return (
     <div
@@ -219,7 +313,34 @@ export const SegmentRow = memo(function SegmentRow({
 
       <div className="min-w-0 flex-1">
         <div className="mb-0.5 flex flex-wrap items-center gap-x-2 gap-y-1">
-          {segment.speaker && speaker && <SpeakerTag name={segment.speaker} style={speaker} />}
+          {chunks.length > 1 ? (
+            /*
+              이 줄 안에서 화자가 바뀐다. 위에 한 사람의 이름표를 세우지
+              않는다 — 세우면 아래 토막들과 어느 쪽이 맞는지 다투게 된다.
+              대신 왜 아래가 여러 도막으로 갈렸는지를 한 마디로 말해 준다.
+            */
+            <span
+              className="inline-flex items-center gap-1 rounded-full bg-(--color-bg-2) px-1.5 py-0.5 text-[10px] text-(--color-fg-3) ring-1 ring-(--color-border-soft)"
+              title="이 조각 안에서 말하는 사람이 바뀝니다. 아래가 바뀌는 자리입니다."
+            >
+              <Users className="h-2.5 w-2.5" />
+              화자 {new Set(chunks.map((c) => c.k)).size}명
+            </span>
+          ) : (
+            segment.speaker && speaker && <SpeakerTag name={segment.speaker} style={speaker} />
+          )}
+          {/*
+            줄 통째의 "덜 확실하다". 토막이 여럿이고 그중 하나에 이미 붙었으면
+            여기서는 안 붙인다 — 같은 말을 두 번 하는 셈이고, 어느 토막이
+            덜 확실한지는 아래가 더 정확히 말한다 (`doubt` 의 설명).
+          */}
+          {doubt > 0 && (
+            <DoubtMark
+              level={doubt}
+              open={doubtOpen}
+              onToggle={() => setDoubtOpen((v) => !v)}
+            />
+          )}
           {segment.edited && (
             /*
               사람이 고친 줄이라는 표시.
@@ -271,6 +392,23 @@ export const SegmentRow = memo(function SegmentRow({
               className="w-full max-w-[16rem] rounded-md bg-(--color-bg-2) px-2.5 py-1.5 text-[12px] text-(--color-fg) ring-1 ring-(--color-border-soft) outline-none focus:ring-(--color-accent)/60"
               aria-label="화자 이름"
             />
+            {segment.speakerSource === "acoustic" && (
+              /*
+                **줄 하나와 목소리 하나는 다른 일이다.**
+
+                여기서 고치는 것은 "이 줄은 저 사람이 아니다" 이고, 그 목소리
+                전체의 이름을 바꾸는 것은 위 "화자" 패널의 일이다. 이 말이
+                없으면 사람은 같은 목소리의 줄 200개를 하나씩 고치기 시작한다.
+
+                그리고 여기서 고친 줄은 **다시 나눠도 안 덮인다**
+                (`speakerSource = "human"`). 그 규칙도 함께 적어 둔다 —
+                다시 나눴는데 이 줄만 그대로인 것이 고장으로 보이면 안 된다.
+              */
+              <p className="text-[10.5px] leading-relaxed break-keep text-(--color-fg-4)">
+                이 줄 하나만 바꿉니다. 같은 목소리의 모든 줄을 바꾸려면 위 “화자” 에서 이름을
+                고치세요. 여기서 고친 줄은 화자를 다시 나눠도 그대로 둡니다.
+              </p>
+            )}
             <textarea
               ref={textRef}
               value={draft}
@@ -347,6 +485,35 @@ export const SegmentRow = memo(function SegmentRow({
               </span>
             </div>
           </div>
+        ) : chunks.length > 1 ? (
+          /*
+            **이 줄 안에서 화자가 바뀐다.**
+
+            토막마다 제 왼쪽 선과 제 이름표를 준다. 글 속에 이름만 끼워 넣으면
+            줄바꿈이 일어나는 순간 어디부터 누구인지가 사라진다.
+
+            이 자리가 이 기능의 값이 실제로 보이는 곳이다 — AMI 조각의 52.2%,
+            그리고 사용자의 진짜 녹음에서 이름표가 바뀌는 58군데 중 50군데가
+            조각 하나 **안**이었다. 여기를 안 그리면 그 50군데가 안 보인다.
+          */
+          <div className="flex flex-col gap-1.5">
+            {chunks.map((c, ci) => {
+              const name = namer?.(c.k) ?? null;
+              return (
+                <SpeakerChunk
+                  key={`${c.k}-${c.start}-${ci}`}
+                  words={c.words}
+                  name={name}
+                  style={name ? (styles.get(name) ?? null) : null}
+                  level={human ? 0 : doubtLevel(c.sil, unsureAt)}
+                  start={c.start}
+                  wordClick={wordClick}
+                  activeT={activeWord >= 0 ? words[activeWord].t : null}
+                  onSeek={onSeek}
+                />
+              );
+            })}
+          </div>
         ) : (
           <p
             /*
@@ -413,6 +580,9 @@ export const SegmentRow = memo(function SegmentRow({
           </p>
         )}
 
+        {/* 왜 "덜 확실하다" 가 붙었는지. 누른 줄에만 뜬다. */}
+        {!editing && doubt > 0 && doubtOpen && <DoubtNote level={doubt} />}
+
         {/* 표시된 줄에는 왜 표시됐는지와 다음에 할 일을 한 줄로 덧붙인다. */}
         {!editing && flag && <SegmentFlagNote flag={flag} />}
       </div>
@@ -437,3 +607,107 @@ export const SegmentRow = memo(function SegmentRow({
     </div>
   );
 });
+
+/**
+ * 한 줄 **안의** 토막 하나. 제 이름표 · 제 왼쪽 선 · 제 "덜 확실하다".
+ *
+ * 왜 따로 뗐나: "덜 확실하다" 를 여는 상태가 토막마다 하나씩 있어야 한다.
+ * 위쪽 줄 상자에 배열로 들고 있으면 토막 수가 바뀔 때(다시 나눌 때) 그
+ * 배열이 어긋나고, 엉뚱한 토막의 설명이 열린다.
+ *
+ * 왼쪽 선은 바깥 줄의 것보다 **가늘다** (2px 대 3~4px). 바깥과 같은 굵기면
+ * 이 토막이 새 줄인지 줄 안의 토막인지가 안 갈린다.
+ */
+function SpeakerChunk({
+  words,
+  name,
+  style,
+  level,
+  start,
+  wordClick,
+  activeT,
+  onSeek,
+}: {
+  words: Word[];
+  name: string | null;
+  style: SpeakerStyle | null;
+  level: 0 | 1;
+  /** 이 토막이 시작하는 시각. 이름표를 누르면 여기부터 재생한다. */
+  start: number;
+  wordClick: boolean;
+  /** 지금 읽고 있는 낱말의 시각. 없으면 null. */
+  activeT: number | null;
+  onSeek: (t: number) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  return (
+    <div
+      className="border-l-2 pl-2"
+      style={{
+        borderLeftColor: style?.color ?? "var(--color-border-soft)",
+        borderLeftStyle: style?.lineStyle ?? "solid",
+      }}
+    >
+      <div className="mb-0.5 flex flex-wrap items-center gap-x-1.5 gap-y-0.5">
+        {/*
+          이름표를 누르면 이 토막의 시작으로 간다. 줄 머리 시각 단추는
+          조각의 시작이라, 조각 중간에서 바뀐 화자를 들으려면 그 자리까지
+          손으로 찾아가야 한다.
+        */}
+        <button
+          type="button"
+          onClick={() => onSeek(start)}
+          title={`${formatClock(start)} 부터 재생`}
+          className="shrink-0 rounded font-mono text-[10px] tabular-nums text-(--color-fg-4) transition hover:text-(--color-accent-strong)"
+        >
+          {formatClock(start)}
+        </button>
+        {name && style && <SpeakerTag name={name} style={style} />}
+        {level > 0 && (
+          <DoubtMark level={level} open={open} onToggle={() => setOpen((v) => !v)} />
+        )}
+      </div>
+
+      <p
+        onClick={(e) => {
+          const sel = typeof window !== "undefined" ? window.getSelection() : null;
+          if (sel && !sel.isCollapsed) return;
+          if (!wordClick) {
+            onSeek(start);
+            return;
+          }
+          const hit = (e.target as HTMLElement).closest<HTMLElement>("[data-t]");
+          if (!hit) return;
+          const t = Number(hit.dataset.t);
+          if (Number.isFinite(t)) onSeek(t);
+        }}
+        title={wordClick ? undefined : `${formatClock(start)} 부터 재생`}
+        className={cn(
+          "text-[13.5px] leading-relaxed break-keep text-(--color-fg-2) [overflow-wrap:anywhere]",
+          !wordClick && "cursor-pointer",
+        )}
+      >
+        {wordClick
+          ? words.map((w, i) => (
+              <span key={i}>
+                <span
+                  data-t={w.t}
+                  className={cn(
+                    "cursor-pointer rounded-[3px] px-px transition-colors hover:bg-(--color-surface-hi)",
+                    activeT !== null &&
+                      w.t === activeT &&
+                      "bg-(--color-accent)/25 underline decoration-(--color-accent-strong) decoration-2 underline-offset-2",
+                  )}
+                >
+                  {w.w}
+                </span>
+                {i < words.length - 1 ? " " : ""}
+              </span>
+            ))
+          : words.map((w) => w.w).join(" ")}
+      </p>
+
+      {level > 0 && open && <DoubtNote level={level} />}
+    </div>
+  );
+}

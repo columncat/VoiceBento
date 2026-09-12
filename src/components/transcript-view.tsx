@@ -16,6 +16,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { api, audioUrl } from "@/lib/client-api";
 import type {
+  DiarNoticeDTO,
+  DiarizationDTO,
   ModelNoticeDTO,
   RecordingNoticeDTO,
   RecordingWithSession,
@@ -31,6 +33,8 @@ import { JobProgress, StateBadge, isBusy } from "./job-state";
 import { readModel } from "./model-capability";
 import { PolishPanel } from "./polish-panel";
 import { SessionBar } from "./session-bar";
+import { makeClusterNamer, useSpeakerStyles } from "./speaker";
+import { SpeakerPanel } from "./speaker-panel";
 import { SplitPane } from "./split-pane";
 import { TranscriptBody } from "./transcript-body";
 import { VoiceChat } from "./voice-chat";
@@ -91,6 +95,12 @@ export function TranscriptView({
   const [notice, setNotice] = useState<RecordingNoticeDTO | null>(null);
   const [polishError, setPolishError] = useState<string | null>(null);
   const [model, setModel] = useState<ModelNoticeDTO | null>(null);
+  /** 이 녹음의 화자 분리 한 판. 안 했으면 null. */
+  const [diarization, setDiarization] = useState<DiarizationDTO | null>(null);
+  /** 화자 분리 기능의 고정 안내. 서술자에서 온다 — 화면이 숫자를 들지 않는다. */
+  const [diar, setDiar] = useState<DiarNoticeDTO | null>(null);
+  /** 지금 적혀 있는 화자 목록. */
+  const [roster, setRoster] = useState<string[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   /** 다듬기가 같은 세션의 다른 녹음 뒤에 줄을 섰다면 그 수. */
@@ -136,6 +146,15 @@ export function TranscriptView({
         setSession(j.session ?? null);
         setNotice(j.notice ?? null);
         setPolishError(j.polishError ?? null);
+        /*
+         * 화자 분리 쪽 셋. **없으면 null·빈 배열로 둔다.**
+         *
+         * 라우트가 아직 이 칸을 안 실어 주는 판본에서도 화면이 멎으면 안
+         * 된다 — 그때 보이는 것은 "화자 분리를 안 한 녹음" 이고, 그건 참이다.
+         */
+        setDiarization(j.diarization ?? null);
+        setDiar(j.diar ?? null);
+        setRoster(j.roster ?? []);
       } catch (e) {
         if (e instanceof Error && e.name === "AbortError") return;
         setError(e instanceof Error ? e.message : "녹음을 불러오지 못했습니다");
@@ -171,6 +190,24 @@ export function TranscriptView({
   }, []);
 
   const cap = useMemo(() => readModel(model), [model]);
+
+  /*
+   * 군집 번호 → 이름, 그리고 이름 → 색·선 모양. **여기서 한 벌만 만든다.**
+   *
+   * 본문과 화자 패널이 둘 다 이것을 쓴다. 각자 만들게 두면 같은 사람이 두
+   * 곳에서 다른 색을 갖는다 — 본문은 **나온 순서**로 번호를 매기고 패널은
+   * **말한 시간 순**으로 매기니 거의 늘 어긋난다. 색은 이 화면에서 사람을
+   * 가르는 주된 표시라 그 어긋남이 곧바로 보인다.
+   *
+   * `otherLabel` 은 서술자에서 온다 — 화면이 "other" 를 지어내지 않는다.
+   * 아직 안내를 못 받았으면 서술자의 기본값을 쓴다.
+   */
+  const otherLabel = diar?.otherLabel ?? "other";
+  const namer = useMemo(
+    () => makeClusterNamer(diarization, otherLabel),
+    [diarization, otherLabel],
+  );
+  const speakers = useSpeakerStyles(segments, namer);
 
   /**
    * 어느 세션에서 도는지, 이름만.
@@ -258,14 +295,32 @@ export function TranscriptView({
   const onRetranscribe = async () => {
     if (
       !confirm(
-        "이 녹음을 처음부터 다시 옮깁니다. 지금 전사문과 직접 고친 줄이 모두 사라집니다. 진행할까요?",
+        /*
+          사라지는 것과 **남는 것**을 둘 다 적는다. 목소리에 붙인 이름은 남는다
+          (`clearSegments`) — 그걸 안 적으면 사람은 이름을 다시 붙일 각오로 누르거나,
+          그게 싫어서 안 누른다. 줄에서 직접 고친 화자는 줄과 함께 사라진다.
+        */
+        "이 녹음을 처음부터 다시 옮깁니다.\n\n" +
+          "사라지는 것: 지금 전사문, 직접 고친 글, 줄에서 직접 고친 화자.\n" +
+          "남는 것: 목소리마다 붙인 이름 — 새 전사가 끝나 화자를 다시 나누면 같은 목소리를 따라 옮겨지고(옮기지 못한 이름은 “다시 확인해 주세요” 로 뜹니다), 화자를 새로 못 나누면 지난번에 나눈 화자가 새 줄에 다시 붙습니다.\n\n" +
+          "진행할까요?",
       )
     ) {
       return;
     }
     try {
       await api.retranscribe(recordingId);
-      setRecording((r) => (r ? { ...r, state: "queued", progress: null, error: null } : r));
+      setRecording((r) =>
+        r
+          ? { ...r, state: "queued", progress: null, error: null, speakerState: "none", speakerError: null }
+          : r,
+      );
+      /*
+       * 조각만 걷는다. **목소리 이름 표(`diarization`)는 그대로 둔다** — 서버도 남긴다
+       * (`clearSegments`). 날 구간은 소리에 대한 것이라 다시 전사해도 참이고, 새 전사가
+       * 끝나면 그 이름이 목소리를 따라 새 줄에 다시 붙는다. 여기서 걷으면 다음 폴링이
+       * 도로 가져올 때까지 이름이 사라진 것처럼 보인다.
+       */
       setSegments([]);
     } catch (e) {
       setError(e instanceof Error ? e.message : "다시 전사를 시작하지 못했습니다");
@@ -439,6 +494,44 @@ export function TranscriptView({
         </div>
 
         <div className="flex flex-wrap items-center gap-2">
+          {/*
+            화자 나누기를 다듬기 **왼쪽**에 둔다. 지금은 화자가 소리에서
+            나오고 다듬기는 문장만 고치므로, 순서가 곧 일의 순서다.
+          */}
+          <SpeakerPanel
+            recordingId={recording.id}
+            state={recording.state}
+            speakerState={recording.speakerState}
+            speakerError={recording.speakerError}
+            duration={recording.duration}
+            diarization={diarization}
+            diar={diar}
+            roster={roster}
+            segments={segments}
+            namer={namer}
+            speakers={speakers}
+            onStarted={() => {
+              /*
+               * 202 만 온다. 상태를 먼저 옮겨 두지 않으면 누른 자리가 그대로라
+               * 한 번 더 누르게 된다. 진짜 상태는 곧 폴링이 가져온다.
+               */
+              setRecording((r) =>
+                r ? { ...r, state: "diarizing", speakerState: "running", speakerError: null } : r,
+              );
+            }}
+            onNamed={(next, nextSegments) => {
+              setDiarization(next);
+              /*
+               * 조각을 통째로 갈아 끼운다. 이름 하나가 바뀌면 **그 목소리의
+               * 모든 줄**이 바뀌므로, 화면이 무엇을 고칠지 스스로 셈하면
+               * 이름 표와 줄이 어긋나는 순간이 생긴다.
+               */
+              if (nextSegments.length) setSegments(nextSegments);
+            }}
+            // 이름 저장이 "판이 바뀌었다"(409)로 돌아오면 폴링을 기다리지 않고 새 판을 받는다.
+            onRefresh={() => void load()}
+          />
+
           <PolishPanel
             recordingId={recording.id}
             segments={segments}
@@ -498,7 +591,7 @@ export function TranscriptView({
 
       {busy && (
         <section className="rounded-[var(--radius-app)] bg-(--color-surface) px-4 py-3 ring-1 ring-(--color-border-soft)">
-          <JobProgress recording={recording} rtf={cap.rtf} />
+          <JobProgress recording={recording} rtf={cap.rtf} diarRtf={diar?.rtf} />
         </section>
       )}
 
@@ -521,6 +614,30 @@ export function TranscriptView({
           <span className="min-w-0">
             같은 세션의 다른 녹음이 먼저 다듬는 중입니다. 앞에 {polishQueued}건이 있어 차례를
             기다립니다 — 한 세션에서 둘이 동시에 돌면 대화가 서로를 덮어씁니다.
+          </span>
+        </p>
+      )}
+
+      {recording.speakerState === "failed" && recording.speakerError && (
+        /*
+          **화자 나누기가 실패했다. 전사가 실패한 것과 다른 일이다.**
+
+          전사문은 멀쩡히 있고 화자만 안 붙은 상태라 붉은 띠가 아니다 —
+          같은 무게로 말하면 사람이 전사까지 날아간 줄 안다.
+
+          이 띠가 꼭 있어야 하는 이유: 사람이 단추를 누르면 "화자 나누는 중"
+          이 뜨고, 실패하면 그것이 조용히 사라지면서 화면이 누르기 전과
+          똑같아진다. 그러면 "눌렀는데 아무 일도 안 났다" 가 되어 한 번 더
+          누른다. 패널 안에만 적어 두면 열어 보는 사람만 안다.
+
+          **문장을 여기서 짓지 않는다.** 서버가 보낸 것이 그 자체로 완결되어
+          있고 (건너뛴 이유든 끊긴 이유든), 앞에 말을 덧붙이면 둘 중 하나에는
+          거짓이 된다.
+        */
+        <p className="flex items-start gap-2 rounded-[var(--radius-app)] bg-(--color-warn)/10 px-4 py-2.5 text-[11.5px] leading-relaxed break-keep text-(--color-warn) ring-1 ring-(--color-warn)/25">
+          <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+          <span className="min-w-0">
+            {recording.speakerError} 위 “화자” 에서 다시 눌러 볼 수 있습니다.
           </span>
         </p>
       )}
@@ -591,6 +708,10 @@ export function TranscriptView({
             jumpRef={jumpRef}
             notice={notice}
             cap={cap}
+            diarization={diarization}
+            namer={namer}
+            speakers={speakers}
+            unsureSilhouette={diar?.unsureSilhouette ?? null}
             showEmptyNotice={emptyish}
             onSave={onSaveSegment}
             className="h-full"

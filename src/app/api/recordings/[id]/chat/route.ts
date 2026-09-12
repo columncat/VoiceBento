@@ -3,6 +3,7 @@ import { z } from "zod";
 
 import {
   CHAT_CONTEXT_CHARS,
+  agentDiarFacts,
   agentModelBrief,
   chatContext,
   chatKey,
@@ -272,6 +273,18 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
        * 로 표시해 두고 대화는 그 줄의 뜻을 짐작해 답하는 식으로.
        */
       model: agentModelBrief(),
+      /**
+       * 소리로 가른 화자에 대한 **사실.** 분리를 안 했으면 null.
+       *
+       * `model` 과 같은 자리에 있는 이유도 같다 — 다듬기와 대화가 한 세션에서
+       * 도는데 한쪽만 화자가 소리로 갈린 것을 알면 앞뒤가 안 맞는 말을 한다.
+       * 저쪽은 이것을 울타리 **밖**에 싣는다 (우리 DB 에서 센 숫자이지 남이
+       * 만든 소리에서 나온 글이 아니다).
+       *
+       * 저쪽이 아직 이 칸을 모르는 판본이면 조용히 무시된다 — 그때는 예전처럼
+       * 화자 이름을 그냥 읽고, 한계 문장만 덜 정확해진다. 깨지지는 않는다.
+       */
+      diar: agentDiarFacts(id),
       message,
       context,
     },
