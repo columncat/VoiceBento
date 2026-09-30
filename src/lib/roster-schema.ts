@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-import { dedupeNames, nameKey } from "./name-key";
+import { cleanName, dedupeNames, nameKey } from "./name-key";
 
 /**
  * 화자 목록을 받는 **한 가지 모양.** 화자 나누기(`…/diarize`)와 올리기
@@ -33,7 +33,9 @@ const rosterBase = () =>
         .string()
         .trim()
         .min(1, "빈 이름은 넣을 수 없습니다.")
-        .max(MAX_ROSTER_NAME, "이름이 너무 깁니다.")
+        // 길이는 **걷어 낸 뒤** 센다. 보이는 40자짜리 이름에 폭 없는 공백 하나가 묻어
+        // 왔다고 거절하면, 사람 눈에는 멀쩡한 이름이 이유 없이 안 들어간다.
+        .refine((v) => cleanName(v).length <= MAX_ROSTER_NAME, "이름이 너무 깁니다.")
         /*
          * 폭 없는 공백(U+200B) 같은 **보이지 않는 글자만으로 된 이름**은 `trim()` 을 지나
          * 한 글자로 남는다. 그대로 받으면 목록에서 한 명으로 세어지다가 같음 열쇠에서는
@@ -71,3 +73,26 @@ export const optionalRoster = () => rosterBase().optional();
 export function dedupeRoster(roster: string[]): string[] {
   return dedupeNames(roster);
 }
+
+/**
+ * 사람이 화자 패널에서 저장하는 **이름 표**. 라우트가 아니라 여기 둔다 — 목록과 같은
+ * 이름 규칙을 쓰고, 규칙이 두 곳에 갈라지면 어느 입구로 들어왔느냐에 따라 받아 주는
+ * 이름이 달라진다.
+ *
+ * 빈 문자열은 **"이 칸의 이름을 뗀다"** 는 뜻이라 그대로 받는다. 다만 보이지 않는 글자만
+ * 적힌 이름은 걷어 내면 비므로, 사람은 이름을 적었는데 기존 이름이 지워진다 — 그건 거절한다.
+ */
+export const speakerNameValue = () =>
+  z
+    .string()
+    .trim()
+    .refine((v) => v.length === 0 || cleanName(v).length > 0, "빈 이름은 넣을 수 없습니다.")
+    .refine((v) => cleanName(v).length <= MAX_ROSTER_NAME, "이름이 너무 깁니다.");
+
+export const speakerNamesMap = () => z.record(z.string(), speakerNameValue());
+
+/** "다시 확인" 목록에서 뺄 이름들. 길이는 걷어 낸 뒤에 센다. */
+export const dismissList = () =>
+  z
+    .array(z.string().trim().refine((v) => cleanName(v).length <= MAX_ROSTER_NAME, "이름이 너무 깁니다."))
+    .max(60);

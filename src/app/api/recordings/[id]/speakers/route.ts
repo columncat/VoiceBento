@@ -3,6 +3,7 @@ import { z } from "zod";
 
 import { logAgent } from "@/lib/agent-log";
 import { diarModel } from "@/lib/env";
+import { dismissList, speakerNamesMap } from "@/lib/roster-schema";
 import {
   getDiarizationRow,
   getRecordingRow,
@@ -61,12 +62,12 @@ const bodySchema = z.object({
    * 군집 번호 → 이름. 빈 문자열이면 그 번호의 이름을 **지운다**
    * (임시 이름 "화자 1" 로 돌아간다). 화면은 사람이 손댄 칸만 보낸다.
    */
-  names: z.record(z.string(), z.string().trim().max(40, "이름이 너무 깁니다.")),
+  names: speakerNamesMap(),
   /**
    * "다시 확인해 주세요" 목록에서 사람이 **뺀** 이름. 이 녹음에 없는 사람이라고 사람이
    * 판단한 것이다. 여기 오지 않은 이름은, 표에 붙이지 않았다면 목록에 그대로 남는다.
    */
-  dismissRecheck: z.array(z.string().trim().max(40, "이름이 너무 깁니다.")).max(60).optional(),
+  dismissRecheck: dismissList().optional(),
 });
 
 export async function PATCH(

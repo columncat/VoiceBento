@@ -1,5 +1,6 @@
 import { and, eq } from "drizzle-orm";
 
+import { MAX_SPEAKER_NAME } from "./name-key";
 import { inLane, laneBusy, laneDepth } from "./agent-queue";
 import {
   AGENT_CONTEXT_LIMIT,
@@ -485,7 +486,6 @@ export function readClusterTag(tag: unknown): number | null {
 }
 
 /** 화자 이름의 길이. 넘으면 이름이 아니라 문장이다 (BentoAgent 의 `MAX_SPEAKER` 와 같은 값). */
-const MAX_SPEAKER_NAME = 40;
 
 /**
  * 이름 자리에 온 **되풀이 이름**. 코드로 막는다.
