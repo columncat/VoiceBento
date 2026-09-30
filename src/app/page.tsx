@@ -50,6 +50,7 @@ export default function HomePage() {
       mailbentoUrl={env.MAILBENTO_URL?.trim() || null}
       memobentoUrl={env.MEMOBENTO_URL?.trim() || null}
       paperbentoUrl={env.PAPERBENTO_URL?.trim() || null}
+      ledgerbentoUrl={env.LEDGERBENTO_URL?.trim() || null}
     />
   );
 }

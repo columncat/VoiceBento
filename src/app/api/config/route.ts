@@ -34,6 +34,7 @@ export async function GET() {
       mailbento: env.MAILBENTO_URL ?? null,
       memobento: env.MEMOBENTO_URL ?? null,
       paperbento: env.PAPERBENTO_URL ?? null,
+      ledgerbento: env.LEDGERBENTO_URL ?? null,
     },
     queue: queueDepth(),
     /** 동시에 몇 건까지 도는가. 화면이 "앞에 N건" 을 말할 때 쓴다. */

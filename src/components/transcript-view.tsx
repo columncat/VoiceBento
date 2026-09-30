@@ -83,11 +83,13 @@ export function TranscriptView({
   mailbentoUrl,
   memobentoUrl,
   paperbentoUrl,
+  ledgerbentoUrl,
 }: {
   recordingId: string;
   mailbentoUrl?: string | null;
   memobentoUrl?: string | null;
   paperbentoUrl?: string | null;
+  ledgerbentoUrl?: string | null;
 }) {
   const [recording, setRecording] = useState<RecordingWithSession | null>(null);
   const [segments, setSegments] = useState<SegmentDTO[]>([]);
@@ -585,6 +587,7 @@ export function TranscriptView({
 
           <CrossAppLink app="memobento" href={memobentoUrl} />
           <CrossAppLink app="paperbento" href={paperbentoUrl} />
+          <CrossAppLink app="ledgerbento" href={ledgerbentoUrl} />
           <CrossAppLink app="mailbento" href={mailbentoUrl} />
         </div>
       </header>

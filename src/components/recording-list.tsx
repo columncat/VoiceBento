@@ -87,6 +87,7 @@ export function RecordingList({
   mailbentoUrl,
   memobentoUrl,
   paperbentoUrl,
+  ledgerbentoUrl,
 }: {
   /**
    * 서버가 그린 첫 목록.
@@ -98,6 +99,7 @@ export function RecordingList({
   mailbentoUrl?: string | null;
   memobentoUrl?: string | null;
   paperbentoUrl?: string | null;
+  ledgerbentoUrl?: string | null;
 }) {
   const [recordings, setRecordings] = useState<RecordingWithSession[]>(initial?.recordings ?? []);
   const [sessions, setSessions] = useState<SessionDTO[]>(initial?.sessions ?? []);
@@ -487,6 +489,7 @@ export function RecordingList({
             <CrossAppLink app="mailbento" href={mailbentoUrl} />
             <CrossAppLink app="memobento" href={memobentoUrl} />
             <CrossAppLink app="paperbento" href={paperbentoUrl} />
+            <CrossAppLink app="ledgerbento" href={ledgerbentoUrl} />
           </div>
         </header>
 

@@ -1,6 +1,6 @@
 "use client";
 
-import { ArrowUpRight, AudioLines, BookMarked, Mail, StickyNote } from "lucide-react";
+import { ArrowUpRight, AudioLines, BookMarked, Mail, StickyNote, Wallet } from "lucide-react";
 import { useEffect, useState } from "react";
 
 /**
@@ -46,6 +46,7 @@ const APPS = {
   memobento: { label: "MemoBento", icon: StickyNote, port: 3001 },
   paperbento: { label: "PaperBento", icon: BookMarked, port: 3002 },
   voicebento: { label: "VoiceBento", icon: AudioLines, port: 3003 },
+  ledgerbento: { label: "LedgerBento", icon: Wallet, port: 3004 },
 } as const;
 
 export type AppKey = keyof typeof APPS;

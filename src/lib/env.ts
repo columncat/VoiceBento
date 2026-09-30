@@ -174,6 +174,13 @@ const envSchema = z.object({
    */
   MAILBENTO_URL: z.string().optional(),
   PAPERBENTO_URL: z.string().optional(),
+  /**
+   * 장부함으로 건너가는 버튼의 주소 (선택).
+   *
+   * 논문함과 같다 — 비우면 3004 포트로 유추하고, 한 도메인을 경로로 나눠 쓰는
+   * 배포에서는 전체 주소를 적어야 한다.
+   */
+  LEDGERBENTO_URL: z.string().optional(),
 
   // ── 전사 ───────────────────────────────────────────────────
   /**
