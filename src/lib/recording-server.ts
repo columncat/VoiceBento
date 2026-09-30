@@ -901,9 +901,30 @@ function carryNames(old: DiarizationRow, input: DiarizationInput): string {
   const heirOf = new Map<number, number>();
   for (const [nk, ok] of plan.heirs) heirOf.set(ok, nk);
 
-  // 이름이 뜰 자리는 말한 시간이 있는 군집뿐이다 (`knownNames` 와 같은 문).
-  const known = new Set(input.talkTime.map((t) => t.k));
-  const rank = new Map(input.talkTime.map((t, i) => [t.k, i]));
+  /*
+   * **이 판에 있는 목소리**를 구간에서 센다. 말한 시간으로 세면 안 된다.
+   *
+   * 말한 시간은 "지금 전사문에 줄이 있는 군집" 이다. 다시 전사해서 어떤 목소리 자리에
+   * 줄이 하나도 안 나오면(워커가 중간에 실패하거나 그 대목이 통째로 빠지면) 그 군집은
+   * 말한 시간이 0 이 되고, 이름이 **영영 사라졌다** — 에이전트 이름은 버려지고 사람
+   * 이름은 "다시 확인" 으로 갔다. 뒤에 멀쩡히 다시 전사해도 표가 안 돌아온다.
+   *
+   * 목소리는 소리에 있는 것이지 전사문에 있는 것이 아니다. 구간에 그 군집이 있으면
+   * 이름은 남는다. 줄이 없으면 화면에 안 뜰 뿐이고, 줄이 돌아오면 이름도 함께 돌아온다.
+   * (군집이 정말 없어졌으면 위의 `heirOf` 가 걸러 낸다.)
+   */
+  const known = new Set(input.turns.map((t) => t.k));
+  /*
+   * 순위도 전사문이 아니라 **소리**로 매긴다. 에이전트 이름은 "말한 시간 상위 L개
+   * 군집" 에만 붙는데(`agentNameAllowed`), 그 순위를 전사 줄로 매기면 줄이 잠깐 없는
+   * 목소리가 순위 밖으로 밀려 이름이 버려진다 — 위 `known` 과 같은 고장의 두 번째 문이다.
+   * 구간 길이로 매기면 전사문이 바뀌어도 순위가 흔들리지 않는다.
+   */
+  const heard = new Map<number, number>();
+  for (const t of input.turns) heard.set(t.k, (heard.get(t.k) ?? 0) + (t.e - t.s));
+  const rank = new Map(
+    [...heard.entries()].sort((a, b) => b[1] - a[1]).map(([k], i) => [k, i] as const),
+  );
 
   const names: Record<string, string> = {};
   const human: number[] = [];
