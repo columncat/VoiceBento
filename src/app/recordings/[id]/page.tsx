@@ -1,7 +1,7 @@
 import { notFound } from "next/navigation";
 
 import { TranscriptView } from "@/components/transcript-view";
-import { env } from "@/lib/env";
+import { appUrls } from "@/lib/app-urls";
 import { getRecordingRow } from "@/lib/recording-server";
 
 /**
@@ -27,10 +27,7 @@ export default async function RecordingPage({
   return (
     <TranscriptView
       recordingId={id}
-      mailbentoUrl={env.MAILBENTO_URL?.trim() || null}
-      memobentoUrl={env.MEMOBENTO_URL?.trim() || null}
-      paperbentoUrl={env.PAPERBENTO_URL?.trim() || null}
-      ledgerbentoUrl={env.LEDGERBENTO_URL?.trim() || null}
+      appUrls={appUrls()}
     />
   );
 }

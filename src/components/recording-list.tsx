@@ -21,7 +21,7 @@ import type {
 } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
-import { CrossAppLink } from "./cross-app-link";
+import { AppSwitcher, type AppUrls } from "./cross-app-link";
 import { estimateTranscribe } from "./format";
 import { isBusy } from "./job-state";
 import { LanguageLine, ModelCredit } from "./language-notice";
@@ -84,10 +84,7 @@ interface Group {
 
 export function RecordingList({
   initial,
-  mailbentoUrl,
-  memobentoUrl,
-  paperbentoUrl,
-  ledgerbentoUrl,
+  appUrls,
 }: {
   /**
    * 서버가 그린 첫 목록.
@@ -96,10 +93,8 @@ export function RecordingList({
    * 모양으로 받는다 — 있으면 쓰고 없으면 붙자마자 받아 온다.
    */
   initial?: Partial<RecordingListResponse> | null;
-  mailbentoUrl?: string | null;
-  memobentoUrl?: string | null;
-  paperbentoUrl?: string | null;
-  ledgerbentoUrl?: string | null;
+  /** 형제 앱 주소 (`lib/app-urls.ts`). 빈 칸은 화면이 유추한다. */
+  appUrls: AppUrls;
 }) {
   const [recordings, setRecordings] = useState<RecordingWithSession[]>(initial?.recordings ?? []);
   const [sessions, setSessions] = useState<SessionDTO[]>(initial?.sessions ?? []);
@@ -486,10 +481,7 @@ export function RecordingList({
                 </span>
               )}
             </button>
-            <CrossAppLink app="mailbento" href={mailbentoUrl} />
-            <CrossAppLink app="memobento" href={memobentoUrl} />
-            <CrossAppLink app="paperbento" href={paperbentoUrl} />
-            <CrossAppLink app="ledgerbento" href={ledgerbentoUrl} />
+            <AppSwitcher urls={appUrls} />
           </div>
         </header>
 

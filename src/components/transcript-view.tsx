@@ -27,7 +27,7 @@ import type {
 import { cn } from "@/lib/utils";
 
 import { AudioBar } from "./audio-bar";
-import { CrossAppLink } from "./cross-app-link";
+import { AppSwitcher, type AppUrls } from "./cross-app-link";
 import { formatLength } from "./format";
 import { JobProgress, StateBadge, isBusy } from "./job-state";
 import { readModel } from "./model-capability";
@@ -80,16 +80,11 @@ const POLL_MS = 2500;
 
 export function TranscriptView({
   recordingId,
-  mailbentoUrl,
-  memobentoUrl,
-  paperbentoUrl,
-  ledgerbentoUrl,
+  appUrls,
 }: {
   recordingId: string;
-  mailbentoUrl?: string | null;
-  memobentoUrl?: string | null;
-  paperbentoUrl?: string | null;
-  ledgerbentoUrl?: string | null;
+  /** 형제 앱 주소 (`lib/app-urls.ts`). 빈 칸은 화면이 유추한다. */
+  appUrls: AppUrls;
 }) {
   const [recording, setRecording] = useState<RecordingWithSession | null>(null);
   const [segments, setSegments] = useState<SegmentDTO[]>([]);
@@ -585,10 +580,7 @@ export function TranscriptView({
             {collapsed ? "칸 펴기" : "칸 접기"}
           </button>
 
-          <CrossAppLink app="memobento" href={memobentoUrl} />
-          <CrossAppLink app="paperbento" href={paperbentoUrl} />
-          <CrossAppLink app="ledgerbento" href={ledgerbentoUrl} />
-          <CrossAppLink app="mailbento" href={mailbentoUrl} />
+          <AppSwitcher urls={appUrls} />
         </div>
       </header>
 

@@ -1,5 +1,5 @@
 import { RecordingList } from "@/components/recording-list";
-import { env } from "@/lib/env";
+import { appUrls } from "@/lib/app-urls";
 import { MODEL_NOTICE } from "@/lib/model";
 import { listRecordings } from "@/lib/recording-server";
 import { listSessions } from "@/lib/session-server";
@@ -47,10 +47,7 @@ export default function HomePage() {
        * 합치면 둘 중 하나가 반드시 틀린다 — 컨테이너 주소를 브라우저에 주면
        * 링크가 죽고, 바깥 주소로 파일을 나르면 터널을 한 바퀴 돌아 나간다.
        */
-      mailbentoUrl={env.MAILBENTO_URL?.trim() || null}
-      memobentoUrl={env.MEMOBENTO_URL?.trim() || null}
-      paperbentoUrl={env.PAPERBENTO_URL?.trim() || null}
-      ledgerbentoUrl={env.LEDGERBENTO_URL?.trim() || null}
+      appUrls={appUrls()}
     />
   );
 }
