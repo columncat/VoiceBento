@@ -9,8 +9,25 @@ import bcrypt from "bcryptjs";
 import { db, schema } from "./db";
 import { env } from "./env";
 
+/**
+ * 인증을 **일부러** 끈 배포인가.
+ *
+ * 값이 비었다고 꺼진 것으로 치지 않는다 — 그건 실수일 수 있다
+ * (`middleware.ts` 의 `misconfigured` 설명). `AUTH_DISABLED=1` 일 때만 끈다.
+ * 미들웨어가 같은 규칙을 문자열로 들고 있다. 한쪽을 고치면 다른 쪽도.
+ */
 export function isAuthEnabled(): boolean {
-  return !!env.AUTH_PASSWORD;
+  return env.AUTH_DISABLED !== "1";
+}
+
+/**
+ * 켜져 있는데 필요한 값이 다 있는가.
+ *
+ * 미들웨어가 먼저 503 으로 막지만, 라우트가 미들웨어 밖에서 불릴 일이 생겨도
+ * "비밀번호 없음 = 아무 비밀번호나 통과" 가 되지 않게 라우트에서도 본다.
+ */
+export function isAuthConfigured(): boolean {
+  return !!env.AUTH_PASSWORD && !!env.AUTH_SECRET;
 }
 
 /** Plaintext 와 bcrypt 해시 둘 다 자동 감지. timing-safe 비교. */

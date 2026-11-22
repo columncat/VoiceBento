@@ -47,11 +47,48 @@ function unauthorized() {
   );
 }
 
-export async function middleware(req: NextRequest) {
-  // 인증 비활성 → 통과
-  if (!process.env.AUTH_PASSWORD) return NextResponse.next();
+/**
+ * 인증 설정이 빠진 배포에 주는 거절.
+ *
+ * 예전에는 `AUTH_PASSWORD` 가 비면 **그냥 통과**시켰다(fail-open). 설치 마법사의
+ * "비워 두면 잠그지 않습니다" 를 위한 것이었는데, 그러면 설정 파일이 비밀번호
+ * 없이 다시 쓰이는 순간(마법사를 다시 돌리며 칸을 비우는 실수 하나) 녹음과
+ * 전사문이 아무 말 없이 열린다. 아무도 그걸 알아채지 못한다.
+ *
+ * 이제는 반대로 닫는다. 잠그지 않고 쓰려면 `AUTH_DISABLED=1` 을 **일부러**
+ * 적어야 한다 — 빠뜨린 것과 고른 것을 구별하기 위해서다.
+ *
+ * 로그인 화면도 열지 않는다. 비밀번호가 없으면 로그인할 방법이 없고, 열어
+ * 두면 "고장" 이 아니라 "비밀번호가 틀렸다" 로 읽힌다.
+ */
+function misconfigured(pathname: string) {
+  if (isApi(pathname)) {
+    return NextResponse.json(
+      { error: "인증 설정이 없어 잠겨 있습니다", code: "auth-misconfigured" },
+      { status: 503, headers: { "cache-control": "no-store" } },
+    );
+  }
+  return new NextResponse(
+    "VoiceBento: 인증 설정(AUTH_PASSWORD / AUTH_SECRET)이 없어 잠겨 있습니다.\n" +
+      "잠그지 않고 쓰려면 AUTH_DISABLED=1 을 명시하세요.\n",
+    {
+      status: 503,
+      headers: { "content-type": "text/plain; charset=utf-8", "cache-control": "no-store" },
+    },
+  );
+}
 
+export async function middleware(req: NextRequest) {
   const { pathname } = req.nextUrl;
+
+  // 명시적으로 끈 배포만 통과. `lib/auth.ts` 의 `isAuthEnabled()` 와 같은 규칙이다
+  // (그쪽은 DB 를 쓰는 모듈이라 Edge 인 여기서 import 할 수 없다).
+  if (process.env.AUTH_DISABLED === "1") return NextResponse.next();
+
+  // 켜져 있는데 값이 없으면 닫는다. AUTH_SECRET 이 없으면 쿠키를 풀 수 없어
+  // 어차피 아무도 못 들어오지만, 그때 나는 것은 예외(500)라 원인이 안 보인다.
+  if (!process.env.AUTH_PASSWORD || !process.env.AUTH_SECRET) return misconfigured(pathname);
+
   if (isPublic(pathname)) return NextResponse.next();
 
   const sessionToken = req.cookies.get("mb_session")?.value;

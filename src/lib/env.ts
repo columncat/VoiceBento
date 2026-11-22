@@ -272,7 +272,7 @@ const envSchema = z.object({
 
   // ── 인증 ───────────────────────────────────────────────────
   /**
-   * 인증 설정 — 둘 다 비우면 인증 비활성 (앱 그대로 공개).
+   * 인증 설정 — 둘 다 있어야 한다. 비우면 앱이 잠긴다(공개되지 않는다).
    * - AUTH_PASSWORD: plaintext 또는 bcrypt 해시 ($2a$ / $2b$ 시작). 둘 다 자동 감지.
    * - AUTH_SECRET: 세션 쿠키 암호화 키 (32바이트 base64).
    *   **형제 앱들과 같은 값이어야 한다** — 쿠키 이름을 나눠 쓰기 때문이다
@@ -280,6 +280,11 @@ const envSchema = z.object({
    */
   AUTH_PASSWORD: z.string().optional(),
   AUTH_SECRET: z.string().optional(),
+  /**
+   * `"1"` 일 때만 인증을 끈다. 위 둘이 비었다고 꺼지지 **않는다** — 그때는
+   * 앱 전체가 503 으로 잠긴다 (`middleware.ts` 의 `misconfigured`).
+   */
+  AUTH_DISABLED: z.string().optional(),
 });
 
 export const env = envSchema.parse(process.env);

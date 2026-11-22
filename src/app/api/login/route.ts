@@ -8,6 +8,7 @@ import {
   SESSION_COOKIE_NAME,
   SESSION_TTL_LONG,
   SESSION_TTL_SHORT,
+  isAuthConfigured,
   isAuthEnabled,
   logLogin,
   nowSeconds,
@@ -48,8 +49,15 @@ const FAIL_DELAY_MS = 700;
 
 export async function POST(req: Request) {
   if (!isAuthEnabled()) {
-    // 인증이 꺼진 배포에서는 쿠키가 필요 없다. 클라이언트가 그대로 진행하면 된다.
+    // `AUTH_DISABLED=1` 로 일부러 끈 배포에서만 쿠키가 필요 없다.
+    // 값이 비었을 뿐인 배포는 여기 오지 않는다 — 아래에서 503 이다.
     return NextResponse.json({ ok: true, authDisabled: true });
+  }
+  if (!isAuthConfigured()) {
+    return NextResponse.json(
+      { error: "인증 설정이 없어 잠겨 있습니다", code: "auth-misconfigured" },
+      { status: 503, headers: { "cache-control": "no-store" } },
+    );
   }
 
   // 횟수로 막는다. 지연만으로는 동시 요청이 겹쳐 사라진다.

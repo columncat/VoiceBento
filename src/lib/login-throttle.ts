@@ -26,11 +26,31 @@ interface Bucket {
 
 const buckets = new Map<string, Bucket>();
 
+/**
+ * 시도를 누구 것으로 셀지.
+ *
+ * 예전에는 X-Forwarded-For 의 **첫** 항목을 썼다. 그 자리는 클라이언트가 직접
+ * 적는다 — Cloudflare 는 들어온 XFF 를 지우지 않고 뒤에 덧붙일 뿐이라,
+ * 요청마다 첫 항목을 바꿔 보내면 매번 새 통을 받아 횟수 제한이 없는 것과 같았다.
+ *
+ * 그래서 믿을 수 있는 순서로 본다.
+ *  1. `cf-connecting-ip` — Cloudflare 가 **덮어쓰는** 머리글이다. 클라이언트가
+ *     같은 이름으로 보내도 엣지에서 바뀐다. 포트가 loopback 에만 묶인 뒤로는
+ *     이 앱에 닿는 것은 cloudflared 뿐이라 이 값이 곧 진짜 주소다.
+ *  2. `x-real-ip` — 다른 앞단(nginx 등)에 얹는 배포용.
+ *  3. X-Forwarded-For 의 **마지막** 항목 — 바로 앞 프록시가 붙인 것이다.
+ *     첫 항목과 달리 클라이언트가 고를 수 없다.
+ *  4. 아무것도 없으면 하나로 묶는다 — 주소를 못 가르는 상황에서는 전부 한
+ *     통에 넣는 편이 안전하다 (도커 망 안의 MCP 같은 기계 클라이언트).
+ */
 function keyOf(req: Request): string {
-  // 프록시 뒤라면 X-Forwarded-For 가 진짜 주소를 들고 있다. 없으면 하나로 묶는다 —
-  // 주소를 못 가르는 상황에서 전부 한 통에 넣는 편이 안전하다.
+  const cf = req.headers.get("cf-connecting-ip")?.trim();
+  if (cf) return cf;
+  const real = req.headers.get("x-real-ip")?.trim();
+  if (real) return real;
   const fwd = req.headers.get("x-forwarded-for");
-  return (fwd?.split(",")[0] ?? "").trim() || "unknown";
+  const last = fwd?.split(",").pop()?.trim();
+  return last || "unknown";
 }
 
 /** 지금 이 요청을 받아도 되는지. 막혔으면 남은 초. */

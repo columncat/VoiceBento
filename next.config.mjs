@@ -14,6 +14,52 @@
  */
 const basePath = (process.env.BASE_PATH ?? "").replace(/\/$/, "");
 
+/**
+ * 모든 응답에 붙이는 보안 머리글.
+ *
+ * HSTS 는 여기 없다 — Cloudflare 가 붙인다. 여기서 또 붙이면 LAN·로컬에서
+ * http 로 열 때 브라우저가 https 를 고집해 화면이 안 뜬다.
+ *
+ * CSP 가 열어 두는 것과 그 까닭:
+ *  - script-src 'unsafe-inline' — App Router 의 flight 자료(`self.__next_f.push`)와
+ *    `layout.tsx` 의 THEME_BOOT 가 인라인 스크립트다. 막으면 화면이 하얗게 빈다.
+ *    nonce 로 가려면 모든 화면이 동적 렌더가 되어야 해서 하지 않았다.
+ *    'unsafe-eval' 은 `next dev` 에서만(HMR 이 eval 을 쓴다). 운영 빌드에는 없다.
+ *  - style-src 'unsafe-inline' — React 의 style 속성과 Next 가 심는 <style>.
+ *  - cdn.jsdelivr.net — Pretendard 글꼴 CSS 와 그 woff2 (`layout.tsx`).
+ *  - fonts.googleapis.com / fonts.gstatic.com — 나머지 글꼴 CSS 와 파일.
+ *  - media-src blob: — `<audio>` 는 자기 API 를 직접 부르지만, 브라우저가
+ *    소리를 blob 으로 다루는 경우를 막지 않으려고 둔다.
+ *  - object-src 'none' — 이 앱에는 <object>/<embed> 가 없다.
+ *  - frame-ancestors 'self' — 남의 사이트가 이 화면을 액자에 넣어 누르게 하는
+ *    클릭재킹을 막는다. X-Frame-Options 는 그걸 모르는 옛 브라우저용.
+ *
+ * 마이크는 쓰지 않는다. 녹음은 다른 기기에서 하고 파일로 올린다 — 그래서
+ * Permissions-Policy 가 마이크까지 막는다. 브라우저 녹음을 넣는 날 여기를 연다.
+ */
+const isDev = process.env.NODE_ENV === "development";
+const csp = [
+  "default-src 'self'",
+  `script-src 'self' 'unsafe-inline'${isDev ? " 'unsafe-eval'" : ""}`,
+  "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com https://cdn.jsdelivr.net",
+  "font-src 'self' data: https://fonts.gstatic.com https://cdn.jsdelivr.net",
+  "img-src 'self' data: blob:",
+  "media-src 'self' blob:",
+  "connect-src 'self'",
+  "object-src 'none'",
+  "base-uri 'self'",
+  "form-action 'self'",
+  "frame-ancestors 'self'",
+].join("; ");
+
+const securityHeaders = [
+  { key: "Content-Security-Policy", value: csp },
+  { key: "X-Content-Type-Options", value: "nosniff" },
+  { key: "Referrer-Policy", value: "same-origin" },
+  { key: "X-Frame-Options", value: "SAMEORIGIN" },
+  { key: "Permissions-Policy", value: "camera=(), microphone=(), geolocation=()" },
+];
+
 /** @type {import('next').NextConfig} */
 const nextConfig = {
   output: "standalone",
@@ -29,6 +75,17 @@ const nextConfig = {
    */
   serverExternalPackages: ["better-sqlite3"],
   ...(basePath ? { basePath } : {}),
+  /*
+   * `source` 에는 basePath 가 저절로 붙는다(`/voice/:path*`). 그 꼴은 접두어
+   * 자체(`/voice`)도 잡는다 — 첫 화면에도 머리글이 붙는 것을 확인했다.
+   * 라우트가 제 CSP 를 따로 다는 곳은 지금 없다. 생기면 그 경로를 여기서 빼라 —
+   * CSP 머리글이 둘이면 브라우저는 **둘 다** 만족해야 해서 더 좁은 쪽이 이긴다.
+   */
+  async headers() {
+    return [{ source: "/:path*", headers: securityHeaders }];
+  },
+  /* `X-Powered-By: Next.js` — 무엇으로 만들었는지 밖에 알릴 까닭이 없다. */
+  poweredByHeader: false,
   env: {
     /*
      * 브라우저 코드에도 알려 준다.
