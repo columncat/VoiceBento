@@ -151,30 +151,27 @@ export function doubtLevel(sil: number | null | undefined, unsureAt: number | nu
  *
  * 색으로만 가르지 않는다. **채워진 막대 수**가 말을 하고, 색은 거들기만 한다.
  * 흑백 화면과 색각 이상에서도 보인다.
+ *
+ * 누르면 펼쳐지던 설명 줄은 걷어 냈다 — 뜻은 `title` 한 줄로 충분하다.
+ * "틀렸다" 고 말하지 않는 것은 그대로다: 이 표시는 멀쩡한 줄에도 붙고,
+ * 이름이 잘못 붙은 줄에는 대개 안 붙는다.
  */
 export function DoubtMark({
   level,
-  open,
-  onToggle,
   className,
 }: {
   /** 0 이면 아무것도 안 그린다. 부르는 쪽이 0 을 거르지 않아도 되게. */
   level: 0 | 1;
-  open: boolean;
-  onToggle: () => void;
   className?: string;
 }) {
   if (level === 0) return null;
   return (
-    <button
-      type="button"
-      onClick={onToggle}
-      aria-expanded={open}
-      aria-label="이 줄은 목소리가 덜 또렷하게 갈렸습니다. 눌러서 설명 보기"
-      title="왜 이 표시가 붙었는지 보기"
+    <span
+      role="img"
+      aria-label="목소리가 덜 또렷하게 갈린 줄"
+      title="목소리가 덜 또렷하게 갈린 줄 (틀렸다는 뜻은 아님)"
       className={cn(
-        "inline-flex h-4 items-end gap-[1.5px] rounded-sm px-0.5 align-middle transition",
-        open ? "bg-(--color-surface-hi)" : "opacity-60 hover:opacity-100",
+        "inline-flex h-4 items-end gap-[1.5px] rounded-sm px-0.5 align-middle opacity-60",
         className,
       )}
     >
@@ -189,31 +186,6 @@ export function DoubtMark({
           )}
         />
       ))}
-    </button>
-  );
-}
-
-/**
- * 눌렀을 때 뜨는 설명. **"틀렸다" 고 말하지 않는다.**
- *
- * 숫자를 안 적는다. 정밀도·재현율을 적어 두면 사람은 그 수를 이 줄 하나에
- * 대한 확률로 읽는데, 그건 **낱말 단위로** 잰 수이고 줄 단위로는 잰 적이 없다.
- * 대화창의 에이전트도 이 줄을 `?` 로 받는다는 것은 적는다 — 둘이 같은 줄을
- * 가리킨다는 사실이 사람이 둘을 견줄 때 필요하다.
- */
-export function DoubtNote({ level }: { level: 0 | 1 }) {
-  if (level === 0) return null;
-  return (
-    <p className="mt-1 flex items-start gap-1.5 rounded-md bg-(--color-bg-2) px-2.5 py-1.5 text-[11px] leading-relaxed break-keep text-(--color-fg-3) ring-1 ring-(--color-border-soft)">
-      <span aria-hidden className="mt-px shrink-0 text-(--color-fg-4)">
-        ⌁
-      </span>
-      <span className="min-w-0">
-        이 줄은 목소리가 덜 또렷하게 갈렸습니다.{" "}
-        <b className="font-medium text-(--color-fg-2)">틀렸다는 뜻은 아닙니다</b> — 이 표시는 멀쩡한
-        줄에도 붙고, 이름이 잘못 붙은 줄에는 대개 안 붙습니다. 대화창의 에이전트에게도 이 줄은
-        이름 뒤에 “?” 가 붙어 갑니다. 여기 붙은 이름을 근거로 삼기 전에 소리를 한 번 들어 보세요.
-      </span>
-    </p>
+    </span>
   );
 }

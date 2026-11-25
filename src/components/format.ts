@@ -50,26 +50,6 @@ export function formatBytes(bytes: number): string {
 }
 
 /**
- * 전사에 걸릴 시간 어림.
- *
- * uno 에서 잰 값이다 — VAD 로 자른 뒤 조각마다 디코딩하는 경로의 RTF 가
- * 0.096 이었다 (60분 → 5분 46초, 10분 → 57초). 4코어 CPU 한 대 기준이라
- * 동시에 두 건이 돌면 그만큼 늘어난다. 그래서 "약" 이라고 적고 올려 잡는다.
- *
- * **이 숫자는 모델의 것이다.** 그래서 부르는 쪽이 모델 서술자의 `rtf` 를
- * 넘겨 준다 — 여기 박아 두면 다른 모델을 붙인 날 "1시간 → 약 6분" 이라는
- * 옛말만 남는다. 서술자를 아직 못 받은 자리를 위해 기본값을 들고 있다.
- */
-export const TRANSCRIBE_RTF = 0.1;
-
-export function estimateTranscribe(
-  seconds: number | null,
-  rtf: number = TRANSCRIBE_RTF,
-): string | null {
-  return estimateWork(seconds, rtf, TRANSCRIBE_RTF);
-}
-
-/**
  * 실시간 대비 배수로 걸릴 시간을 어림한다. **셈은 전사나 화자 분리나 같다.**
  *
  * 화자 분리의 RTF 는 0.27 로 전사(0.096)의 세 배 가까이 되지만, 그 값은 여기

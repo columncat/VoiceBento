@@ -1,12 +1,11 @@
 "use client";
 
-import { ChevronDown, Info, Languages, MousePointerClick, TriangleAlert } from "lucide-react";
-import { useState } from "react";
+import { Info, TriangleAlert } from "lucide-react";
 
 import type { RecordingNoticeDTO } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
-import { languageNames, type ModelCapability } from "./model-capability";
+import type { ModelCapability } from "./model-capability";
 
 /**
  * **이 모델이 무엇을 알아듣고 무엇을 못 알아듣는가.**
@@ -63,86 +62,6 @@ function Emphasized({ text }: { text: string }) {
 }
 
 /**
- * 알아듣는 말을 다 펼쳐 보는 자리.
- *
- * 접어 두는 것은 25개가 한 줄에 안 들어가기 때문이고, **펼친 뒤에야 그리는**
- * 것은 코드를 이름으로 옮기는 `Intl` 의 자료가 서버(Node)와 브라우저에서
- * 판본이 다를 수 있어서다. 서버가 그린 글자와 브라우저가 그린 글자가
- * 어긋나면 하이드레이션이 깨진다 — 열기 전에는 아무것도 안 그리면 그 일이
- * 아예 안 생긴다.
- */
-function LanguageList({ codes }: { codes: string[] }) {
-  const [open, setOpen] = useState(false);
-  if (codes.length === 0) return null;
-
-  return (
-    <>
-      <button
-        type="button"
-        onClick={() => setOpen((v) => !v)}
-        aria-expanded={open}
-        className="inline-flex items-center gap-0.5 rounded text-(--color-fg-4) underline decoration-dotted underline-offset-2 transition hover:text-(--color-fg-2)"
-      >
-        {open ? "접기" : `${codes.length}개 모두 보기`}
-        <ChevronDown className={cn("h-3 w-3 transition-transform", open && "rotate-180")} />
-      </button>
-      {open && (
-        <span className="mt-1 block text-[11px] leading-relaxed break-keep text-(--color-fg-4)">
-          {languageNames(codes).join(" · ")}
-        </span>
-      )}
-    </>
-  );
-}
-
-/**
- * 서버에서 모델 정보를 못 받았다는 표시.
- *
- * 없으면 안 되는 줄이다. 기본값은 **지금 물려 있는 모델의 사실**이라,
- * 한국어 되는 모델로 갈아 끼운 뒤 목록 요청이 실패하면 "한국어를 못 합니다"
- * 가 거짓말이 된다. 그때 이 한 줄이 있어야 사람이 의심할 수 있다.
- */
-function StaleMark({ cap }: { cap: ModelCapability }) {
-  if (cap.fromServer) return null;
-  return (
-    <span className="text-(--color-fg-4)"> (모델 정보를 못 받아 기본값으로 적습니다)</span>
-  );
-}
-
-/**
- * 올리는 자리에 미리 적어 두는 한 줄.
- *
- * "올린 다음에" 가 아니라 **올리기 전에** 보여야 한다. 한 시간짜리 영상을
- * 20분 올린 뒤에 알게 되면 그 20분이 통째로 헛수고다.
- */
-export function LanguageLine({ cap, className }: { cap: ModelCapability; className?: string }) {
-  return (
-    <div
-      className={cn(
-        "rounded-lg bg-(--color-bg-2) px-3 py-2 text-[11.5px] leading-relaxed break-keep text-(--color-fg-3) ring-1 ring-(--color-border-soft)",
-        className,
-      )}
-    >
-      <p className="flex items-start gap-2">
-        <Languages className="mt-0.5 h-3.5 w-3.5 shrink-0 text-(--color-fg-4)" />
-        <span className="min-w-0">
-          <span className="font-mono text-[11px] text-(--color-fg-4)">{cap.name}</span> 은(는){" "}
-          {cap.languageSummary}를 알아듣습니다.{" "}
-          {!cap.understandsUiLanguage && (
-            // 못 하는 쪽만 눈에 띄게. 굵게 + 경고색이라 색을 못 보는 눈에도 남는다.
-            <b className="font-medium text-(--color-warn)">
-              <Emphasized text={cap.notice} />
-            </b>
-          )}
-          <StaleMark cap={cap} />{" "}
-          <LanguageList codes={cap.languages} />
-        </span>
-      </p>
-    </div>
-  );
-}
-
-/**
  * 전사문이 비었거나 이상할 때, 그 자리에 대신 놓는 말.
  *
  * 서버가 무엇을 알아챘는지(`RecordingNoticeDTO`)에 따라 말이 달라진다. 소리는
@@ -191,60 +110,13 @@ export function EmptyTranscriptNotice({
         {language ? (
           <>
             전사 모델 <span className="font-mono text-[11.5px]">{cap.name}</span> 은(는){" "}
-            {cap.languageLong}를 알아듣습니다. <Emphasized text={cap.notice} /> 지금 화면이 비어
-            있는 것은 그 때문일 수 있습니다.
+            {cap.languageLong}를 알아듣습니다. <Emphasized text={cap.notice} />
           </>
         ) : (
-          <>
-            소리는 있는데 말로 들리는 대목이 없었습니다. 음악·잡음만 담긴 파일이거나, 목소리가
-            너무 작아 묻힌 경우입니다. 다른 파일로 다시 해 보세요.
-          </>
+          "소리는 있는데 말로 들리는 대목이 없었습니다."
         )}
       </p>
-
-      <p className="text-[11.5px] leading-relaxed break-keep text-(--color-fg-4)">
-        {/*
-          할 수 있는 일을 함께 적는다. "안 됩니다" 만 있고 다음 수가 없으면
-          사람은 같은 파일을 한 번 더 올린다.
-        */}
-        {cap.languageSummary}로 된 녹음이라면 잘 됩니다. 파일이 잘못된 것 같으면 원본을 재생해
-        보고, 소리가 제대로 들리는데도 이 화면이 나오면 다시 전사를 눌러 보세요.
-      </p>
     </div>
-  );
-}
-
-/**
- * 이 모델이 시각을 얼마나 잘게 주는가.
- *
- * `timestamps: "none"` 인 모델(sherpa-onnx 의 whisper 갈래가 실제로 그렇다)
- * 에서는 낱말을 눌러도 갈 데가 없다. 그때 **낱말 클릭은 아예 접고** 이 줄로
- * 그 사실을 말한다 — 눌러 보고 아무 일도 안 일어나는 것을 몇 번 겪은 뒤에야
- * 안 된다는 것을 아는 것이 가장 나쁘다.
- *
- * 잘게 주는 모델에서는 아무 말도 안 한다. 되는 것을 자랑할 자리가 아니다.
- */
-export function TimestampCapabilityLine({
-  cap,
-  className,
-}: {
-  cap: ModelCapability;
-  className?: string;
-}) {
-  if (cap.wordClick) return null;
-  return (
-    <p
-      className={cn(
-        "flex items-start gap-2 rounded-lg bg-(--color-bg-2) px-3 py-1.5 text-[11px] leading-relaxed break-keep text-(--color-fg-4) ring-1 ring-(--color-border-soft)",
-        className,
-      )}
-    >
-      <MousePointerClick className="mt-0.5 h-3 w-3 shrink-0" />
-      <span className="min-w-0">
-        이 모델은 낱말 단위 시각을 주지 않습니다. 줄 왼쪽의 시각이나 글을 누르면 그 줄이
-        시작하는 대목부터 들을 수 있습니다.
-      </span>
-    </p>
   );
 }
 

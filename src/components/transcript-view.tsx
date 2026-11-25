@@ -533,7 +533,6 @@ export function TranscriptView({
             recordingId={recording.id}
             segments={segments}
             state={recording.state}
-            sessionName={sessionName}
             onRun={onPolish}
           />
 
@@ -606,10 +605,7 @@ export function TranscriptView({
         */
         <p className="flex items-start gap-2 rounded-[var(--radius-app)] bg-(--color-surface) px-4 py-2.5 text-[11.5px] leading-relaxed break-keep text-(--color-fg-3) ring-1 ring-(--color-border-soft)">
           <Loader2 className="mt-0.5 h-3.5 w-3.5 shrink-0 animate-spin text-(--color-accent)" />
-          <span className="min-w-0">
-            같은 세션의 다른 녹음이 먼저 다듬는 중입니다. 앞에 {polishQueued}건이 있어 차례를
-            기다립니다 — 한 세션에서 둘이 동시에 돌면 대화가 서로를 덮어씁니다.
-          </span>
+          <span className="min-w-0">다듬기 차례를 기다리는 중 — 앞에 {polishQueued}건</span>
         </p>
       )}
 
@@ -631,9 +627,7 @@ export function TranscriptView({
         */
         <p className="flex items-start gap-2 rounded-[var(--radius-app)] bg-(--color-warn)/10 px-4 py-2.5 text-[11.5px] leading-relaxed break-keep text-(--color-warn) ring-1 ring-(--color-warn)/25">
           <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
-          <span className="min-w-0">
-            {recording.speakerError} 위 “화자” 에서 다시 눌러 볼 수 있습니다.
-          </span>
+          <span className="min-w-0">{recording.speakerError}</span>
         </p>
       )}
 
@@ -648,14 +642,11 @@ export function TranscriptView({
           할 것("표시된 줄 3개: …"). 앞에 "다듬기가 끝나지 못했습니다" 를
           붙이면 뒤엣것이 실패로 둔갑한다. 표시를 붙이는 것은 이 기능이
           제대로 돈 결과인데 화면이 그것을 고장이라고 말하는 셈이다.
-          서버가 보낸 문장은 둘 다 그 자체로 완결되어 있으니 그대로 싣고,
-          우리는 둘 다에 참인 말만 덧붙인다.
+          서버가 보낸 문장은 둘 다 그 자체로 완결되어 있으니 그대로만 싣는다.
         */
         <p className="flex items-start gap-2 rounded-[var(--radius-app)] bg-(--color-warn)/10 px-4 py-2.5 text-[11.5px] leading-relaxed break-keep text-(--color-warn) ring-1 ring-(--color-warn)/25">
           <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
-          <span className="min-w-0">
-            {polishError} 옮긴 글은 그대로 있습니다. 뜻대로 되지 않았다면 다시 눌러 보세요.
-          </span>
+          <span className="min-w-0">{polishError}</span>
         </p>
       )}
 
@@ -670,7 +661,7 @@ export function TranscriptView({
         />
       ) : (
         <p className="rounded-[var(--radius-app)] bg-(--color-surface) px-4 py-3 text-xs break-keep text-(--color-fg-4) ring-1 ring-(--color-border-soft)">
-          이 녹음에는 붙어 있는 파일이 없습니다. 글은 보고 고칠 수 있지만 재생은 안 됩니다.
+          이 녹음에는 붙어 있는 파일이 없습니다
         </p>
       )}
 

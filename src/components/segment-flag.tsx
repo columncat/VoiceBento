@@ -107,7 +107,12 @@ export function isFlagged(segment: SegmentDTO): boolean {
   return typeof segment.flag === "string" && segment.flag.trim().length > 0;
 }
 
-/** 줄 머리에 붙는 알약. `고침` 배지와 같은 자리에 선다. */
+/**
+ * 줄 머리에 붙는 알약. `고침` 배지와 같은 자리에 선다.
+ *
+ * 왜 표시됐는지는 `title` 로만 단다 — 줄마다 설명 줄을 깔면 표시가 많은
+ * 녹음에서 전사문보다 안내가 더 길어진다.
+ */
 export function SegmentFlagBadge({
   flag,
   className,
@@ -127,19 +132,5 @@ export function SegmentFlagBadge({
       <Icon className="h-2.5 w-2.5 shrink-0" />
       {label}
     </span>
-  );
-}
-
-/**
- * 줄 아래에 붙는 한 줄 설명.
- *
- * 알약만으로는 "그래서 내가 무엇을 해야 하나" 가 없다. 짧게 적되 **왜 그
- * 줄이 표시됐는지**와 다음 수(소리를 들어 보라)를 함께 둔다.
- */
-export function SegmentFlagNote({ flag }: { flag: SegmentFlagView }) {
-  return (
-    <p className="mt-1 rounded-md bg-(--color-warn)/8 px-2 py-1 text-[10.5px] leading-relaxed break-keep text-(--color-fg-3) ring-1 ring-(--color-warn)/20">
-      {flag.look.hint}
-    </p>
   );
 }

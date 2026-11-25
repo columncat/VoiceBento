@@ -98,16 +98,6 @@ export function UploadPanel({ open, onClose }: { open: boolean; onClose: () => v
         </ul>
       )}
 
-      {active.length > 0 && (
-        /*
-          창을 닫으면 조각 전송이 끊긴다는 것을 미리 말해 둔다. 큰 파일에서는
-          "다 됐겠지" 하고 탭을 닫는 일이 실제로 생기고, 그러면 수십 분이
-          날아간다. 나중에 오류로 알려 주는 것보다 지금 한 줄이 낫다.
-        */
-        <p className="border-t border-(--color-border-soft) px-4 py-2 text-[10.5px] break-keep text-(--color-fg-4)">
-          다 올라갈 때까지 이 탭을 열어 두세요. 닫으면 전송이 멈춥니다.
-        </p>
-      )}
     </div>
   );
 }

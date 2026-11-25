@@ -240,10 +240,10 @@ export function SpeakerLegend({
       */}
       <span className="text-[10.5px] break-keep text-(--color-fg-4)">
         {source === "acoustic"
-          ? "목소리를 재서 가른 이름입니다. 이름 자체는 위 “화자” 에서 목소리마다 고칠 수 있고, 한 줄만 다르면 그 줄에서 고치세요."
+          ? "목소리로 가른 이름"
           : source === "agent-guess"
-            ? "소리를 듣지 않고 대사의 흐름만 보고 지은 이름입니다. 위 “화자” 에서 소리로 다시 나눌 수 있습니다."
-            : "사람이 직접 적은 이름입니다."}
+            ? "대사로 추정한 이름"
+            : "직접 적은 이름"}
       </span>
     </div>
   );

@@ -6,7 +6,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type RefObject } fro
 import type { DiarizationDTO, RecordingNoticeDTO, SegmentDTO } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
-import { EmptyTranscriptNotice, TimestampCapabilityLine } from "./language-notice";
+import { EmptyTranscriptNotice } from "./language-notice";
 import type { ModelCapability } from "./model-capability";
 import { isFlagged } from "./segment-flag";
 import { SegmentRow } from "./segment-row";
@@ -287,17 +287,7 @@ export function TranscriptBody({
   );
 
   if (showEmptyNotice) {
-    return (
-      <div className={cn("flex flex-col gap-3", className)}>
-        <EmptyTranscriptNotice notice={notice} cap={cap} />
-        {/* 조각이 있긴 하면(빈 글이라도) 아래에 그대로 보여 준다. 시각은 맞으니까. */}
-        {segments.length > 0 && (
-          <p className="px-1 text-[11px] text-(--color-fg-4)">
-            아래는 옮겨진 조각 {segments.length}개입니다. 대부분 비어 있습니다.
-          </p>
-        )}
-      </div>
-    );
+    return <EmptyTranscriptNotice notice={notice} cap={cap} className={className} />;
   }
 
   return (
@@ -320,11 +310,7 @@ export function TranscriptBody({
         */
         <div className="flex shrink-0 flex-wrap items-center gap-x-2 gap-y-1 rounded-lg bg-(--color-warn)/10 px-3 py-1.5 text-[11px] break-keep text-(--color-warn) ring-1 ring-(--color-warn)/25">
           <Waves className="h-3.5 w-3.5 shrink-0" />
-          <span className="min-w-0">
-            이 녹음은 화자 나누기가 특히 불안합니다 — 목소리들이 서로 잘 안 갈렸습니다.
-            아래 이름들은 자리가 바뀌어 붙어 있을 수 있으니, 누가 말했는지가 중요한 대목은 소리를
-            들어 확인해 주세요.
-          </span>
+          <span className="min-w-0">이 녹음은 화자 나누기가 특히 불안합니다</span>
         </div>
       )}
 
@@ -340,9 +326,7 @@ export function TranscriptBody({
         <div className="flex shrink-0 flex-wrap items-center gap-x-2 gap-y-1 rounded-lg bg-(--color-bg-2) px-3 py-1.5 text-[11px] break-keep text-(--color-fg-3) ring-1 ring-(--color-border-soft)">
           <Gauge className="h-3.5 w-3.5 shrink-0 text-(--color-fg-4)" />
           <span className="min-w-0">
-            이 녹음은 화자 신뢰도를 재지 못했습니다 — {diarization.silhouetteMissing} 그래서 줄마다의
-            “덜 또렷” 표시와 녹음 전체의 경고가 붙지 않습니다. 표시가 없다고 확실하다는 뜻은
-            아닙니다.
+            화자 신뢰도를 재지 못했습니다 — {diarization.silhouetteMissing}
           </span>
         </div>
       )}
@@ -359,10 +343,8 @@ export function TranscriptBody({
         <div className="flex shrink-0 flex-wrap items-center gap-x-2 gap-y-1 rounded-lg bg-(--color-warn)/10 px-3 py-1.5 text-[11px] break-keep text-(--color-warn) ring-1 ring-(--color-warn)/25">
           <UserRoundSearch className="h-3.5 w-3.5 shrink-0" />
           <span className="min-w-0">
-            다시 확인해 주세요 — 화자를 다시 나누면서{" "}
-            <b className="font-medium">{diarization.recheckNames.join(", ")}</b> 을(를) 어느 목소리에
-            붙일지 뚜렷하지 않아 옮기지 않았습니다. 위 “화자” 에서 이름을 다시 붙이고 저장하면 이
-            안내가 사라집니다.
+            다시 붙이지 못한 이름:{" "}
+            <b className="font-medium">{diarization.recheckNames.join(", ")}</b>
           </span>
         </div>
       )}
@@ -375,9 +357,6 @@ export function TranscriptBody({
         />
       )}
 
-      {/* 시각을 낱말 단위로 못 주는 모델이면 그 사실을 여기서 말한다. */}
-      <TimestampCapabilityLine cap={cap} className="shrink-0" />
-
       {flagged > 0 && (
         /*
           에이전트가 다듬지 않고 표시만 한 줄이 있다.
@@ -389,10 +368,7 @@ export function TranscriptBody({
         */
         <div className="flex shrink-0 flex-wrap items-center gap-x-2 gap-y-1 rounded-lg bg-(--color-warn)/10 px-3 py-1.5 text-[11px] break-keep text-(--color-warn) ring-1 ring-(--color-warn)/25">
           <TriangleAlert className="h-3.5 w-3.5 shrink-0" />
-          <span className="min-w-0">
-            에이전트가 표시한 줄 {flagged}개 — 알아듣지 못했을 수 있어 다듬지 않고 그대로
-            두었습니다. 소리를 들어 보고 고쳐 주세요.
-          </span>
+          <span className="min-w-0">에이전트가 표시한 줄 {flagged}개</span>
           <button
             type="button"
             onClick={jumpToFlagged}

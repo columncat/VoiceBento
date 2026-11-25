@@ -212,11 +212,6 @@ export function SessionBar({
               </button>
             </header>
 
-            <p className="mb-2.5 text-[11px] leading-relaxed break-keep text-(--color-fg-4)">
-              다듬기·대화·요약이 모두 이 세션에서 돕니다. 같은 세션에 있는 지난 녹음의 화자
-              이름과 용어를 이어받습니다.
-            </p>
-
             {/* ── 이름 고치기 ─────────────────────────────── */}
             {here && (
               <div className="mb-3 flex items-center gap-1.5">
@@ -292,10 +287,7 @@ export function SessionBar({
                   <div className="flex flex-col gap-1.5 rounded-md bg-(--color-warn)/10 px-2 py-1.5 ring-1 ring-(--color-warn)/25">
                     <p className="flex items-start gap-1.5 text-[10.5px] leading-relaxed break-keep text-(--color-warn)">
                       <AlertTriangle className="mt-0.5 h-3 w-3 shrink-0" />
-                      <span className="min-w-0">
-                        상한에 닿아 더 다듬거나 물을 수 없습니다. 잘라 보내면 에이전트가 못 본
-                        대목을 “없다” 고 답하기 때문에, 자르는 대신 멈춥니다.
-                      </span>
+                      <span className="min-w-0">상한에 닿아 더 다듬거나 물을 수 없습니다</span>
                     </p>
                     <button
                       type="button"

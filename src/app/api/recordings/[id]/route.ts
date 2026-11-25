@@ -5,7 +5,7 @@ import { z } from "zod";
 
 import { advancePolish } from "@/lib/agent";
 import { logAgent } from "@/lib/agent-log";
-import { OTHER_SPEAKER, ROSTER_HINT, diarAttribution } from "@/lib/diar-models";
+import { OTHER_SPEAKER, diarAttribution } from "@/lib/diar-models";
 import { MODEL_NOTICE } from "@/lib/model";
 import { diarModel, diarPaths } from "@/lib/env";
 import {
@@ -120,7 +120,6 @@ function diarNotice(): DiarNoticeDTO {
     name: diarModel.name,
     rtf: diarModel.rtf,
     maxAudioSeconds: diarModel.runtime.maxAudioSeconds,
-    rosterHint: ROSTER_HINT,
     otherLabel: OTHER_SPEAKER,
     warnSilhouette: diarModel.fileWarnSilhouetteMedian,
     /*

@@ -15,7 +15,7 @@ import type {
 } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
-import { estimateWork, formatLength } from "./format";
+import { formatLength } from "./format";
 import { RosterInput } from "./roster-input";
 import type { ClusterNamer, SpeakerStyle } from "./speaker";
 
@@ -31,9 +31,8 @@ import type { ClusterNamer, SpeakerStyle } from "./speaker";
  * ## "모르면 넉넉히 적으세요" — 비대칭이 분명하다
  *
  * 한 사람을 빠뜨리면 정확도가 8.3pt 떨어지고, 한 사람을 더 적으면 4.1pt
- * 오른다. 그러니 이 화면은 "정확히 몇 명인가요" 를 물으면 안 된다. 문구는
- * 서술자에서 온다 (`DiarNoticeDTO.rosterHint`) — 화면에 박아 두면 그 판단이
- * 두 곳에 살게 된다.
+ * 오른다. 그러니 이 화면은 "정확히 몇 명인가요" 를 물으면 안 된다. 다만 그
+ * 설명을 화면에 늘어놓지는 않는다 — 안내문이 자리를 먹는다.
  *
  * ## `k = 인원 + 2` 는 **화면에 안 보인다**
  *
@@ -224,8 +223,6 @@ export function SpeakerPanel({
     Number.isFinite(duration) &&
     duration > diar.maxAudioSeconds;
 
-  const eta = estimateWork(duration, diar?.rtf, 0.27);
-
   /**
    * 인원 수가 그대로면 **같은 결과가 나온다.**
    *
@@ -239,9 +236,9 @@ export function SpeakerPanel({
     diarization.roster.length === draft.length;
 
   const blocked = !diar
-    ? "화자 분리 안내를 아직 못 받았습니다. 잠시 뒤에 다시 열어 주세요."
+    ? "화자 분리 안내를 아직 못 받았습니다"
     : !diar.ready
-      ? "화자 분리 모델이 아직 준비되지 않았습니다. 전사문은 그대로 나옵니다."
+      ? "화자 분리 모델이 아직 준비되지 않았습니다"
       : state !== "done"
         ? "전사가 끝나야 화자를 나눌 수 있습니다."
         : segments.length === 0
@@ -249,7 +246,7 @@ export function SpeakerPanel({
           : tooLong
             ? `${formatLength(duration)}짜리는 화자를 나누지 않습니다 (상한 ${formatLength(
                 diar.maxAudioSeconds,
-              )}). 이보다 길면 메모리를 다 써서 멈춥니다 — 전사문은 그대로입니다.`
+              )})`
             : null;
 
   const canRun = !blocked && draft.length > 0 && !starting && !running;
@@ -391,31 +388,8 @@ export function SpeakerPanel({
               </button>
             </header>
 
-            {/*
-              **"모르면 넉넉히 적으세요".** 비대칭이 분명하다 — 하나 모자라면
-              −8.3pt, 하나 넉넉하면 +4.1pt. 문구는 서술자에서 온다.
-            */}
-            <p className="mb-2 text-[11px] leading-relaxed break-keep text-(--color-fg-4)">
-              {diar?.rosterHint ??
-                "말한 사람을 아는 대로 적어 주세요. 헷갈리면 넉넉히 적는 편이 낫습니다."}
-            </p>
-
             {/* 올리기 화면과 같은 입력 칸이다 (`roster-input.tsx`). IME·중복 규칙이 한 곳에 산다. */}
-            <RosterInput value={draft} onChange={setDraft} className="mb-2" />
-
-            <p className="mb-3 text-[10.5px] leading-relaxed break-keep text-(--color-fg-4)">
-              {/*
-                여기 적은 이름이 곧바로 줄에 붙지 않는다는 말이 이 칸에서
-                가장 중요하다. 안 적어 두면 사람은 목록 순서가 곧 화자 순서인
-                줄 알고, 나눈 결과가 그 순서와 다르면 고장으로 본다.
-                (실제로 음향 순서만으로 이름을 맞히면 64.9% 다 — 그래서 이름은
-                나눈 뒤에 사람이 단다.)
-              */}
-              여기 적은 이름이 곧바로 줄에 붙는 것은 아닙니다 — 소리는 목소리를{" "}
-              <b className="font-medium">가르기만</b> 하고, 어느 목소리가 누구인지는 나눈 뒤에
-              아래에서 정합니다.
-              {eta && ` · ${formatLength(duration)}짜리면 나누는 데 ${eta} 걸립니다.`}
-            </p>
+            <RosterInput value={draft} onChange={setDraft} className="mb-3" />
 
             {blocked && (
               <p className="mb-3 flex items-start gap-1.5 rounded-md bg-(--color-bg-2) px-3 py-2 text-[11px] leading-relaxed break-keep text-(--color-fg-3) ring-1 ring-(--color-border-soft)">
@@ -426,8 +400,7 @@ export function SpeakerPanel({
 
             {!blocked && sameSize && (
               <p className="mb-3 rounded-md bg-(--color-bg-2) px-3 py-2 text-[11px] leading-relaxed break-keep text-(--color-fg-3) ring-1 ring-(--color-border-soft)">
-                지난번과 인원 수가 같아 다시 돌려도 <b className="font-medium">같은 결과</b>가
-                나옵니다. 이름만 바꾸려면 아래에서 고치세요.
+                지난번과 인원 수가 같아 다시 돌려도 같은 결과가 나옵니다
               </p>
             )}
 
@@ -451,29 +424,12 @@ export function SpeakerPanel({
             )}
 
             <div className="flex items-center justify-end gap-2">
-              <span className="mr-auto text-[10.5px] break-keep text-(--color-fg-4)">
-                {draft.length === 0 ? (
-                  /*
-                    단추가 꺼져 있는 이유를 적는다. 그냥 흐릿한 단추만 두면
-                    사람은 고장으로 보고 몇 번 더 누른다.
-
-                    한 명도 안 받는 길을 열지 않는 이유: 사람 수를 아예 안 주고
-                    문턱으로 무리를 정하면 진짜 회의에서 화자가 40~134명 나온다.
-                  */
-                  <>한 명이라도 적어야 나눌 수 있습니다 — 사람 수를 모르면 목소리가 수십 갈래로 갈립니다</>
-                ) : (
-                  /*
-                    다시 눌러도 잃는 것이 없다는 말이 여기 있어야 한다. "다시
-                    전사" 와 나란히 선 단추라, 저쪽처럼 전사문을 날리는 줄 알면
-                    아무도 안 누른다.
-                  */
-                  <>전사문은 그대로 있습니다 · 줄에서 직접 고친 화자는 안 덮습니다</>
-                )}
-              </span>
               <button
                 type="button"
                 onClick={() => void run()}
                 disabled={!canRun}
+                // 꺼진 까닭은 툴팁으로만 단다. 사람 수 없이 나누면 목소리가 수십 갈래로 갈린다.
+                title={draft.length === 0 ? "한 명이라도 적어야 나눌 수 있습니다" : undefined}
                 className="flex items-center gap-1.5 rounded-full bg-(--color-accent) px-4 py-1.5 text-xs font-medium text-(--color-bg) transition hover:bg-(--color-accent-strong) disabled:opacity-50"
               >
                 {starting && <Loader2 className="h-3 w-3 animate-spin" />}
@@ -483,13 +439,7 @@ export function SpeakerPanel({
 
             {clusters.length > 0 && (
               <section className="mt-4 border-t border-(--color-border-soft) pt-3">
-                <h3 className="mb-1 text-[11.5px] text-(--color-fg-2)">이 녹음에서 갈린 목소리</h3>
-                <p className="mb-2 text-[10.5px] leading-relaxed break-keep text-(--color-fg-4)">
-                  말을 많이 한 순서입니다. 이름을 고치면{" "}
-                  <b className="font-medium">그 목소리의 모든 줄</b>이 함께 바뀝니다. 비워 두면
-                  “화자 1” 같은 임시 이름으로 돌아갑니다. 적어 주신 인원보다 많이 갈린 목소리는
-                  전사문에 “{diar?.otherLabel ?? "other"}” 로 묶여 나옵니다.
-                </p>
+                <h3 className="mb-2 text-[11.5px] text-(--color-fg-2)">이 녹음에서 갈린 목소리</h3>
                 {resplit && (
                   /*
                     **화자를 다시 나눴다.** 이름 칸의 번호가 새로 매겨져, 적고 있던 것을
@@ -502,13 +452,10 @@ export function SpeakerPanel({
                   >
                     <AlertTriangle className="mt-0.5 h-3 w-3 shrink-0" />
                     <span className="min-w-0 flex-1">
-                      화자를 다시 나눴습니다 — 이름을 확인해 주세요. 목소리 번호가 새로 매겨져
-                      적고 계시던 것은 저장하지 않았습니다.
+                      화자를 다시 나눴습니다 — 적던 이름은 저장되지 않았습니다
                       {resplit.typed.length > 0 && (
                         <>
-                          {" "}
-                          적으신 이름: <b className="font-medium">{resplit.typed.join(", ")}</b> —
-                          알맞은 목소리 칸에 다시 적어 주세요.
+                          : <b className="font-medium">{resplit.typed.join(", ")}</b>
                         </>
                       )}
                     </span>
@@ -535,9 +482,7 @@ export function SpeakerPanel({
                   <div className="mb-2 flex items-start gap-1.5 rounded-md bg-(--color-warn)/10 px-2.5 py-1.5 text-[11px] leading-relaxed break-keep text-(--color-warn) ring-1 ring-(--color-warn)/25">
                     <UserRoundSearch className="mt-0.5 h-3 w-3 shrink-0" />
                     <span className="min-w-0">
-                      다시 확인해 주세요 — 다시 나누면서 아래 이름을 어느 목소리에 붙일지 뚜렷하지
-                      않아 옮기지 않았습니다. 알맞은 목소리 칸에 적고 “이름 저장” 을 누르면 그
-                      이름이 여기서 빠집니다. 이 녹음에 없는 사람이면 × 로 빼고 저장하세요.
+                      다시 붙이지 못한 이름
                       <span className="mt-1 flex flex-wrap gap-1">
                         {recheck.map((n) => (
                           <span
@@ -629,9 +574,6 @@ export function SpeakerPanel({
                 </datalist>
 
                 <div className="mt-2 flex items-center justify-end gap-2">
-                  <span className="mr-auto text-[10.5px] break-keep text-(--color-fg-4)">
-                    소리는 목소리를 가르기만 합니다. 누구인지는 사람이 정합니다.
-                  </span>
                   <button
                     type="button"
                     onClick={() => void saveNames()}

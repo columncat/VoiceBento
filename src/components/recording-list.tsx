@@ -22,9 +22,8 @@ import type {
 import { cn } from "@/lib/utils";
 
 import { AppSwitcher, type AppUrls } from "./cross-app-link";
-import { estimateTranscribe } from "./format";
 import { isBusy } from "./job-state";
-import { LanguageLine, ModelCredit } from "./language-notice";
+import { ModelCredit } from "./language-notice";
 import { readModel } from "./model-capability";
 import { RecordingCard } from "./recording-card";
 import { SessionHeader } from "./session-header";
@@ -488,7 +487,6 @@ export function RecordingList({
         {/*
           올리는 자리. **목록 위에 둔다** — 이 앱에서 가장 자주 하는 일이
           파일을 올리는 것이고, 카드가 스무 장 쌓인 뒤에도 그 자리는 안 밀려야 한다.
-          모델 안내도 여기 붙는다. 올리기 전에 보여야 뜻이 있다.
 
           파일을 받으면 이 자리가 통째로 **어디로 보낼지 묻는 화면**으로 바뀐다.
           둘을 같이 두면 "올리기" 가 두 군데가 되어, 물음에 답하지 않고 다시
@@ -498,8 +496,6 @@ export function RecordingList({
           <SessionPicker
             files={pending}
             sessions={sessions}
-            // 올리기 직전이 이 안내가 가장 필요한 순간이다. 상자와 함께 사라지면 안 된다.
-            notice={<LanguageLine cap={cap} />}
             fixedSessionId={pendingTarget}
             onCancel={() => {
               setPending(null);
@@ -512,26 +508,12 @@ export function RecordingList({
             <div className="flex flex-wrap items-center justify-between gap-3">
               <div className="flex min-w-0 items-center gap-2.5">
                 <Upload className="h-4 w-4 shrink-0 text-(--color-accent)" />
-                <div className="min-w-0">
-                  <p className="text-sm text-(--color-fg-2)">
-                    소리나 영상 파일을 끌어다 놓거나 골라서 올리세요
-                  </p>
-                  <p className="text-[11px] break-keep text-(--color-fg-4)">
-                    영상은 소리만 뽑아서 씁니다.{" "}
-                    {cap.rtf !== null && (
-                      <>
-                        전사에는 오디오 길이의 약{" "}
-                        {Math.max(1, Math.round(cap.rtf * 100))}% 가 걸립니다 (1시간 →{" "}
-                        {estimateTranscribe(3600, cap.rtf)}).{" "}
-                      </>
-                    )}
-                    올릴 때 어느 세션에 넣을지 한 번 묻습니다.
-                  </p>
-                </div>
+                <p className="min-w-0 text-sm text-(--color-fg-2)">
+                  소리나 영상 파일을 끌어다 놓거나 골라서 올리세요
+                </p>
               </div>
               <UploadButton onFiles={takeFiles} onReject={(m) => fail(new Error(m))} />
             </div>
-            <LanguageLine cap={cap} />
           </section>
         )}
 
@@ -544,11 +526,6 @@ export function RecordingList({
           <div className="flex flex-col items-center justify-center gap-2 rounded-[var(--radius-card)] border border-dashed border-(--color-border) py-20 text-center">
             <AudioLines className="h-7 w-7 text-(--color-fg-4)" />
             <p className="text-sm text-(--color-fg-3)">아직 올린 녹음이 없습니다</p>
-            <p className="max-w-[34rem] px-6 text-[12px] leading-relaxed break-keep text-(--color-fg-4)">
-              회의 녹음, 인터뷰, 강의 영상을 올리면 글로 옮겨 드립니다. 옮긴 글은 시각을 눌러
-              그 대목을 들을 수 있고, 손으로 고칠 수도 있습니다. 같은 회의가 반복되면 한 세션에
-              모아 두세요 — 지난 회차의 화자 이름과 용어를 물려받습니다.
-            </p>
           </div>
         ) : showGroups ? (
           <div className="flex flex-col gap-7">
@@ -570,7 +547,7 @@ export function RecordingList({
                     고르는 목록에는 계속 나타난다.
                   */
                   <p className="px-1 text-[11.5px] break-keep text-(--color-fg-4)">
-                    아직 이 세션에 붙은 녹음이 없습니다. 위의 “이 세션에 올리기” 로 넣으세요.
+                    아직 이 세션에 붙은 녹음이 없습니다
                   </p>
                 ) : (
                   <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4">

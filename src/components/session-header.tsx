@@ -231,10 +231,7 @@ export function SessionHeader({
         <p className="flex items-start gap-1.5 rounded-md bg-(--color-warn)/10 px-2.5 py-1.5 text-[10.5px] leading-relaxed break-keep text-(--color-warn) ring-1 ring-(--color-warn)/25">
           <TriangleAlert className="mt-0.5 h-3 w-3 shrink-0" />
           <span className="min-w-0">
-            이 세션의 맥락이 상한({session.contextLimit.toLocaleString()}자)에 닿았습니다. 더
-            다듬거나 물으면 거절됩니다 — 잘라 보내면 에이전트가 못 본 대목을 “없다” 고 답하기
-            때문입니다. 전사문 화면의 세션 알약에서 <b className="font-medium">맥락을 새로
-            시작</b>하거나 그 녹음을 새 세션으로 옮기세요.
+            이 세션의 맥락이 상한({session.contextLimit.toLocaleString()}자)에 닿았습니다
           </span>
         </p>
       )}

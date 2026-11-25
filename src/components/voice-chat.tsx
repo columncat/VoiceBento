@@ -404,15 +404,7 @@ export function VoiceChat({
             inBig ? "px-1 py-12 text-sm" : "px-1 py-4 text-[12px]",
           )}
         >
-          이 녹음의 전사문을 읽고 답합니다. 무슨 이야기였는지, 무엇이 정해졌는지, 어느 대목에
-          그 말이 나오는지 물어보세요.
-          {sessionName && (
-            <>
-              {" "}
-              세션 <b className="font-medium text-(--color-fg-3)">{sessionName}</b> 에서 도는
-              대화라, 방금 다듬은 결과와 같은 세션의 지난 녹음도 이어받습니다.
-            </>
-          )}
+          아직 나눈 대화가 없습니다
         </p>
       )}
       {turns.map((t, i) => {

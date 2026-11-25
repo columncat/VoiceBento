@@ -8,11 +8,10 @@ import type { SegmentDTO } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
 import { formatClock } from "./format";
-import { SegmentFlagBadge, SegmentFlagNote, normalizeFlag } from "./segment-flag";
+import { SegmentFlagBadge, normalizeFlag } from "./segment-flag";
 import { SpeakerTag, type ClusterNamer, type SpeakerStyle } from "./speaker";
 import {
   DoubtMark,
-  DoubtNote,
   doubtLevel,
   splitByRuns,
   /*
@@ -144,8 +143,6 @@ export const SegmentRow = memo(function SegmentRow({
   const [draft, setDraft] = useState(segment.text);
   const [draftSpeaker, setDraftSpeaker] = useState(segment.speaker ?? "");
   const [saving, setSaving] = useState(false);
-  /** "덜 확실하다" 표시를 눌렀나. 줄마다 따로 연다. */
-  const [doubtOpen, setDoubtOpen] = useState(false);
   const textRef = useRef<HTMLTextAreaElement | null>(null);
   const composing = useRef(false);
   /** Esc 로 접었나. 접을 때 나는 blur 가 저장으로 새지 않게 하는 문지기. */
@@ -334,13 +331,7 @@ export const SegmentRow = memo(function SegmentRow({
             여기서는 안 붙인다 — 같은 말을 두 번 하는 셈이고, 어느 토막이
             덜 확실한지는 아래가 더 정확히 말한다 (`doubt` 의 설명).
           */}
-          {doubt > 0 && (
-            <DoubtMark
-              level={doubt}
-              open={doubtOpen}
-              onToggle={() => setDoubtOpen((v) => !v)}
-            />
-          )}
+          {doubt > 0 && <DoubtMark level={doubt} />}
           {segment.edited && (
             /*
               사람이 고친 줄이라는 표시.
@@ -392,26 +383,10 @@ export const SegmentRow = memo(function SegmentRow({
               className="w-full max-w-[16rem] rounded-md bg-(--color-bg-2) px-2.5 py-1.5 text-[12px] text-(--color-fg) ring-1 ring-(--color-border-soft) outline-none focus:ring-(--color-accent)/60"
               aria-label="화자 이름"
             />
-            {segment.speakerSource === "acoustic" && (
-              /*
-                **줄 하나와 목소리 하나는 다른 일이다.**
-
-                여기서 고치는 것은 "이 줄은 저 사람이 아니다" 이고, 그 목소리
-                전체의 이름을 바꾸는 것은 위 "화자" 패널의 일이다. 이 말이
-                없으면 사람은 같은 목소리의 줄 200개를 하나씩 고치기 시작한다.
-
-                그리고 여기서 고친 줄은 **다시 나눠도 안 덮인다**
-                (`speakerSource = "human"`). 그 규칙도 함께 적어 둔다 —
-                다시 나눴는데 이 줄만 그대로인 것이 고장으로 보이면 안 된다.
-              */
-              <p className="text-[10.5px] leading-relaxed break-keep text-(--color-fg-4)">
-                이 줄 하나만 바꿉니다. 같은 목소리의 모든 줄을 바꾸려면 위 “화자” 에서 이름을
-                고치세요. 여기서 고친 줄은 화자를 다시 나눠도 그대로 둡니다.
-              </p>
-            )}
             <textarea
               ref={textRef}
               value={draft}
+              title="Enter 저장 · Shift+Enter 줄바꿈 · Esc 취소"
               rows={Math.min(8, Math.max(2, Math.ceil(draft.length / 60)))}
               onChange={(e) => {
                 const c = (e.nativeEvent as InputEvent).isComposing;
@@ -480,9 +455,6 @@ export const SegmentRow = memo(function SegmentRow({
                   날 것 넣기
                 </button>
               )}
-              <span className="text-[10.5px] text-(--color-fg-4)">
-                Enter 저장 · Shift+Enter 줄바꿈 · Esc 취소
-              </span>
             </div>
           </div>
         ) : chunks.length > 1 ? (
@@ -580,11 +552,6 @@ export const SegmentRow = memo(function SegmentRow({
           </p>
         )}
 
-        {/* 왜 "덜 확실하다" 가 붙었는지. 누른 줄에만 뜬다. */}
-        {!editing && doubt > 0 && doubtOpen && <DoubtNote level={doubt} />}
-
-        {/* 표시된 줄에는 왜 표시됐는지와 다음에 할 일을 한 줄로 덧붙인다. */}
-        {!editing && flag && <SegmentFlagNote flag={flag} />}
       </div>
 
       {!editing && (
@@ -639,7 +606,6 @@ function SpeakerChunk({
   activeT: number | null;
   onSeek: (t: number) => void;
 }) {
-  const [open, setOpen] = useState(false);
   return (
     <div
       className="border-l-2 pl-2"
@@ -663,9 +629,7 @@ function SpeakerChunk({
           {formatClock(start)}
         </button>
         {name && style && <SpeakerTag name={name} style={style} />}
-        {level > 0 && (
-          <DoubtMark level={level} open={open} onToggle={() => setOpen((v) => !v)} />
-        )}
+        {level > 0 && <DoubtMark level={level} />}
       </div>
 
       <p
@@ -706,8 +670,6 @@ function SpeakerChunk({
             ))
           : words.map((w) => w.w).join(" ")}
       </p>
-
-      {level > 0 && open && <DoubtNote level={level} />}
     </div>
   );
 }

@@ -44,11 +44,7 @@ export const DEFAULT_RTF = 0.1;
 
 export interface ModelCapability {
   name: string;
-  /** ISO 639-1 코드. 못 받으면 빈 배열 — 그때는 `languageSummary` 만 쓴다. */
-  languages: string[];
-  /** 짧은 목록. 문장 안에 넣는 자리에 쓴다. */
-  languageSummary: string;
-  /** 긴 목록. 펼쳐 보는 자리에 쓴다. 없으면 짧은 것을 쓴다. */
+  /** 알아듣는 말의 목록(사람 말). 빈 전사문 안내에 쓴다. */
   languageLong: string;
   /** 이 화면의 말을 알아듣나. 아니면 경고를 띄운다. */
   understandsUiLanguage: boolean;
@@ -83,26 +79,18 @@ export interface ModelCapability {
   attribution: string;
   /** 못 하는 것을 사람 말로 적은 한 문단. */
   notice: string;
-  /** 서버가 준 것인가, 우리가 들고 있던 기본값인가. */
-  fromServer: boolean;
 }
 
 /**
  * 서버에서 아무것도 못 받았을 때 쓰는 값.
  *
- * 지금 이 앱에 실제로 물려 있는 모델의 사실이다. **기본값이라는 것이 화면에
- * 보여야 한다**(`fromServer: false`) — 나중에 한국어 되는 모델로 갈아 끼운
- * 뒤 목록 요청이 실패하면, 이 값이 "한국어를 못 합니다" 라는 **거짓말**이
- * 되기 때문이다. 화면은 그때 "모델 정보를 못 받았습니다" 를 함께 적는다.
+ * 지금 이 앱에 실제로 물려 있는 모델의 사실이다. 나중에 한국어 되는 모델로
+ * 갈아 끼우면 이 값도 함께 고쳐야 한다 — 안 그러면 목록 요청이 실패한 날
+ * 빈 전사문 안내가 "한국어를 못 합니다" 라는 **거짓말**을 한다.
  */
 const FALLBACK: ModelCapability = {
   name: "parakeet-tdt-0.6b-v3",
   // parakeet v3 가 알아듣는 유럽어 25개. 한국어(ko)가 없다.
-  languages: [
-    "en", "es", "fr", "de", "bg", "hr", "cs", "da", "nl", "et", "el", "fi", "hu",
-    "it", "lv", "lt", "mt", "pl", "pt", "ro", "sk", "sl", "sv", "ru", "uk",
-  ],
-  languageSummary: "영어를 비롯한 유럽 25개 언어",
   languageLong: "영어를 비롯한 유럽 25개 언어",
   understandsUiLanguage: false,
   timestamps: "token",
@@ -113,13 +101,12 @@ const FALLBACK: ModelCapability = {
   attribution: "전사 모델: NVIDIA parakeet-tdt-0.6b-v3 (CC BY 4.0) · sherpa-onnx (Apache-2.0)",
   notice:
     "한국어는 알아듣지 못합니다. 한국어 오디오를 넣으면 오류 대신 빈 글이나 엉뚱한 로마자가 나옵니다.",
-  fromServer: false,
 };
 
 /**
  * 서버가 준 것을 화면이 쓰는 모양으로.
  *
- * 없으면 기본값. **어느 쪽인지 `fromServer` 로 남긴다.**
+ * 없으면 기본값.
  */
 export function readModel(m: ModelNoticeDTO | null | undefined): ModelCapability {
   if (!m) return FALLBACK;
@@ -129,8 +116,6 @@ export function readModel(m: ModelNoticeDTO | null | undefined): ModelCapability
 
   return {
     name: m.name || FALLBACK.name,
-    languages: codes,
-    languageSummary: m.languages || FALLBACK.languageSummary,
     languageLong: m.languagesLong || m.languages || FALLBACK.languageLong,
     /*
      * 코드 목록이 오면 그것으로 판단하고, 없으면 서버가 만든 참거짓을 믿는다.
@@ -155,33 +140,5 @@ export function readModel(m: ModelNoticeDTO | null | undefined): ModelCapability
     rtf: typeof m.rtf === "number" && m.rtf > 0 ? m.rtf : null,
     attribution: m.attribution?.trim() || FALLBACK.attribution,
     notice: m.notice?.trim() || FALLBACK.notice,
-    fromServer: true,
   };
-}
-
-/**
- * 코드를 사람이 읽는 이름으로.
- *
- * `Intl.DisplayNames` 를 쓴다 — 표를 손으로 들고 있으면 모델을 갈아 끼울 때
- * 그 표에 없는 코드가 반드시 나온다. 못 옮기면 코드를 그대로 돌려준다.
- *
- * **브라우저에서만 부른다.** `Intl` 의 언어 자료는 Node 와 브라우저에서
- * 판본이 다를 수 있어, 서버가 그린 글자와 브라우저가 그린 글자가 어긋나면
- * 하이드레이션이 깨진다. 그래서 이 함수를 쓰는 자리는 **펼쳐 봐야 그려지는
- * 목록** 하나뿐이다.
- */
-export function languageNames(codes: string[]): string[] {
-  let dn: Intl.DisplayNames | null = null;
-  try {
-    dn = new Intl.DisplayNames([UI_LANGUAGE], { type: "language" });
-  } catch {
-    /* 이 판에 없으면 코드를 그대로 쓴다 */
-  }
-  return codes.map((c) => {
-    try {
-      return dn?.of(c) ?? c;
-    } catch {
-      return c;
-    }
-  });
 }

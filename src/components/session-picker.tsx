@@ -3,7 +3,6 @@
 import { FolderPlus, Layers, Search, Upload, Users, X } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 
-import { ROSTER_HINT } from "@/lib/diar-models";
 import type { SessionDTO } from "@/lib/types";
 import { cn, formatRelativeTime } from "@/lib/utils";
 
@@ -52,7 +51,7 @@ import { titleFromFilename } from "./upload-queue";
  *
  * **선택 칸이다.** 모르면 비워 두고 올리면 된다. 전사문은 그대로 나오고, 나중에
  * 전사문 화면의 "화자" 에서 적으면 그때 나눈다. 올리기를 목록 때문에 막지 않는다.
- * 문구는 서술자의 `ROSTER_HINT` 한 곳에서 온다 — "모르면 넉넉히 적으세요".
+ * 설명 문구는 두지 않는다 — 화면 자리를 먹는 안내문을 걷어 냈다(2026-11-25).
  *
  * ## 기존 세션이면 **지난 목록을 채워 보여 준다** — 말없이 물려받지 않는다
  *
@@ -75,7 +74,6 @@ const SHOWN = 6;
 export function SessionPicker({
   files,
   sessions,
-  notice,
   fixedSessionId,
   onCancel,
   onConfirm,
@@ -88,15 +86,6 @@ export function SessionPicker({
    * 고르기를 접고 목록 칸만 묻는다. 그 세션이 목록에 없으면(그새 지워졌으면) 평소처럼 묻는다.
    */
   fixedSessionId?: string | null;
-  /**
-   * 모델 안내(무엇을 알아듣는가). **이 상자 안에 들어와야 한다.**
-   *
-   * 이 상자가 뜨는 동안 아래의 올리는 칸은 사라진다 — 올리기가 두 군데면
-   * 물음에 답하지 않고 다시 파일을 고르는 길이 생겨서다. 그런데 그 칸에
-   * 붙어 있던 것이 "이 모델은 한국어를 못 합니다" 다. 같이 사라지면 **가장
-   * 필요한 순간에** 없어진다 — 지금이 올리기 직전이다.
-   */
-  notice?: React.ReactNode;
   onCancel: () => void;
   /** 고른 세션과 적어 준 화자 목록(비었으면 자동 분리를 건너뛴다). */
   onConfirm: (target: UploadTarget, roster: string[]) => void;
@@ -106,7 +95,7 @@ export function SessionPicker({
   const [roster, setRoster] = useState<string[]>(() => fixed?.lastRoster ?? []);
   /** 목록 칸을 사람이 손댔나. 안 댔을 때만 고른 세션의 지난 목록으로 다시 채운다. */
   const [rosterTouched, setRosterTouched] = useState(false);
-  /** 지금 칸에 든 목록을 어느 세션에서 채웠나. 사람에게 "채워 두었습니다" 를 말할 근거. */
+  /** 지금 칸에 든 목록을 어느 세션에서 채웠나. 사람에게 "채웠다" 는 사실을 말할 근거. */
   const [filledFrom, setFilledFrom] = useState<string | null>(() =>
     fixed?.lastRoster?.length ? fixed.name : null,
   );
@@ -207,8 +196,7 @@ export function SessionPicker({
               {fixed ? `“${fixed.name}” 세션에 올립니다` : "이 파일들을 어느 세션에 넣을까요"}
             </h2>
             <p className="text-[11px] break-keep text-(--color-fg-4)">
-              {files.length}개 · {formatBytes(totalSize)} — 같은 세션에 넣으면 다듬기·대화·요약이
-              지난 녹음의 화자 이름과 용어를 물려받습니다.
+              {files.length}개 · {formatBytes(totalSize)}
             </p>
           </div>
         </div>
@@ -307,10 +295,7 @@ export function SessionPicker({
             아직 세션이 하나도 없다. 고를 것이 없으니 목록도 안 그린다 —
             빈 목록을 보여 주면 "고를 수 있는데 아무것도 없다" 처럼 읽힌다.
           */
-          <p className="px-1 text-[11px] break-keep text-(--color-fg-4)">
-            아직 세션이 없습니다. 첫 세션이 여기서 만들어지고, 다음에 올릴 때부터 이어 붙일 수
-            있습니다.
-          </p>
+          <p className="px-1 text-[11px] text-(--color-fg-4)">아직 세션이 없습니다</p>
         ) : (
           <div className="flex flex-col gap-1.5">
             <div className="flex items-center justify-between gap-2 px-1">
@@ -362,12 +347,6 @@ export function SessionPicker({
                 ))}
               </ul>
             )}
-
-            {!query && ordered.length > SHOWN && (
-              <p className="px-1 text-[10.5px] text-(--color-fg-4)">
-                최근 {SHOWN}개만 보입니다. 나머지는 위 칸에서 이름으로 찾으세요.
-              </p>
-            )}
           </div>
         )}
       </div>
@@ -379,23 +358,14 @@ export function SessionPicker({
           <Users className="h-3.5 w-3.5 shrink-0 text-(--color-accent-strong)" />
           말한 사람 <span className="text-[11px] text-(--color-fg-4)">(선택)</span>
         </span>
-        <p className="text-[11px] leading-relaxed break-keep text-(--color-fg-4)">
-          {ROSTER_HINT}{" "}
-          {roster.length === 0
-            ? "비워 두면 전사만 하고 화자는 나누지 않습니다 — 나중에 전사문에서 적으면 그때 나눕니다."
-            : files.length > 1
-              ? `올리는 ${files.length}개 모두에 이 목록을 씁니다.`
-              : "전사가 끝나면 이 목록으로 화자를 나눕니다."}
-        </p>
         {filledFrom && !rosterTouched && roster.length > 0 && (
           /*
             채운 목록이라는 것을 **말한다.** 말없이 채워 두면 사람은 지난 회차의 목록이
             이번 녹음에 그대로 쓰인다는 것을 모른 채 올린다 — 빠진 사람이 있으면 k 가
             어긋나고, 온 적 없는 사람 이름이 에이전트의 닫힌 집합에 들어간다.
           */
-          <p className="text-[11px] leading-relaxed break-keep text-(--color-accent-strong)">
-            “{filledFrom}” 의 지난 녹음에 적었던 목록을 채워 두었습니다 — 이번에 말한 사람에 맞게
-            빼거나 더하세요.
+          <p className="text-[11px] break-keep text-(--color-accent-strong)">
+            “{filledFrom}” 의 지난 목록을 채웠습니다
           </p>
         )}
         <RosterInput
@@ -407,17 +377,7 @@ export function SessionPicker({
         />
       </div>
 
-      {notice}
-
       <div className="flex flex-wrap items-center justify-end gap-2">
-        <span className="mr-auto text-[10.5px] break-keep text-(--color-fg-4)">
-          {/*
-            잘못 골라도 되돌릴 수 있다는 것을 여기서 말해 둔다. 이 말이 없으면
-            사람이 고르기를 무서워해서, 무서운 나머지 아무것도 안 고르거나
-            매번 새 세션만 만든다.
-          */}
-          올린 뒤에도 카드에서 다른 세션으로 옮길 수 있습니다.
-        </span>
         <button
           type="button"
           onClick={onCancel}

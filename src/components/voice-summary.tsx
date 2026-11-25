@@ -278,17 +278,18 @@ export function VoiceSummary({
                       disabled={running}
                       className="mt-0.5 h-3.5 w-3.5 shrink-0"
                     />
-                    <span className="min-w-0 break-keep text-(--color-fg-3)">
-                      <b className="text-(--color-fg-2)">직접 쓰신 요약이 이미 있습니다.</b> 새로
-                      만들면 지금 글은 사라지고 되돌릴 수 없습니다. 덮어써도 괜찮습니다.
+                    <span className="min-w-0 break-keep text-(--color-fg-2)">
+                      직접 쓴 요약을 덮어씁니다
                     </span>
                   </label>
                 )}
 
                 <div className="mt-3 flex items-center justify-end gap-2">
-                  <span className="mr-auto text-[10.5px] break-keep text-(--color-fg-4)">
-                    {running ? `읽고 쓰는 중… ${elapsed}초` : "전사문 전체가 에이전트에게 넘어갑니다"}
-                  </span>
+                  {running && (
+                    <span className="mr-auto text-[10.5px] text-(--color-fg-4)">
+                      읽고 쓰는 중… {elapsed}초
+                    </span>
+                  )}
                   <button
                     type="button"
                     onClick={() => void run()}
@@ -355,8 +356,8 @@ export function VoiceSummary({
       ) : (
         <p className="py-6 text-center text-[12px] break-keep text-(--color-fg-4)">
           {ready
-            ? "아직 요약이 없습니다. 에이전트에게 맡기거나 직접 적을 수 있습니다."
-            : "전사가 끝나면 요약할 수 있습니다."}
+            ? "아직 요약이 없습니다"
+            : "전사가 끝나지 않았습니다"}
         </p>
       )}
     </section>

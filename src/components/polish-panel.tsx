@@ -1,6 +1,6 @@
 "use client";
 
-import { AlertTriangle, Layers, Loader2, Users, WandSparkles, X } from "lucide-react";
+import { AlertTriangle, Loader2, Users, WandSparkles, X } from "lucide-react";
 import { useMemo, useState } from "react";
 
 import type { JobState, SegmentDTO } from "@/lib/types";
@@ -49,8 +49,8 @@ import { formatBytes } from "./format";
  *
  * ## 사람이 고친 줄은 안 덮는다
  *
- * 계약의 `edited` 다. 이걸 화면에 적어 두지 않으면, 다듬기를 다시 돌렸는데
- * 어떤 줄만 그대로인 것이 고장으로 보인다.
+ * 계약의 `edited` 다. 고친 줄이 몇 개인지는 화면에 센다 — 다시 돌렸는데
+ * 어떤 줄만 그대로인 것이 고장으로 보이지 않게.
  */
 
 /** 에이전트 입구가 한 번에 받는 크기. */
@@ -87,15 +87,12 @@ export function PolishPanel({
   recordingId,
   segments,
   state,
-  sessionName,
   onRun,
   className,
 }: {
   recordingId: string;
   segments: SegmentDTO[];
   state: JobState;
-  /** 어느 세션에서 도는지. 안 붙어 있으면 null. */
-  sessionName: string | null;
   /** 시작시키기. 진행은 녹음의 `state` 가 `polishing` 으로 바뀌며 보인다. */
   onRun: (context: string) => Promise<void>;
   className?: string;
@@ -179,43 +176,6 @@ export function PolishPanel({
               </button>
             </header>
 
-            {/*
-              어느 세션에서 도는지 먼저 말한다. 맥락을 적기 전에 알아야 할
-              것이다 — 세션이 이미 지난 회차의 용어를 들고 있으면 여기에
-              같은 것을 또 적을 필요가 없다.
-            */}
-            <p className="mb-2 flex items-start gap-1.5 rounded-md bg-(--color-bg-2) px-2.5 py-1.5 text-[11px] leading-relaxed break-keep text-(--color-fg-3) ring-1 ring-(--color-border-soft)">
-              <Layers className="mt-0.5 h-3 w-3 shrink-0 text-(--color-accent-strong)" />
-              <span className="min-w-0">
-                {sessionName ? (
-                  <>
-                    세션 <b className="font-medium text-(--color-fg-2)">{sessionName}</b> 에서
-                    돕니다. 이 세션의 지난 녹음에서 쓰던 용어와 말투를 이어받고, 다듬은 결과는
-                    오른쪽 대화창이 그대로 이어받습니다.
-                  </>
-                ) : (
-                  <>
-                    이 녹음은 어느 세션에도 붙어 있지 않습니다. 이어받을 지난 회차가 없고, 다듬은
-                    결과도 이 녹음 안에서만 남습니다.
-                  </>
-                )}
-              </span>
-            </p>
-
-            <p className="mb-2 text-[11px] leading-relaxed break-keep text-(--color-fg-4)">
-              {/*
-                맥락 한 줄이 결과를 크게 바꾼다. 분야를 알면 전문 용어의
-                철자가 맞고, 무슨 자리인지 알면 말투가 어울리게 다듬어진다.
-                비워도 되지만 왜 적으면 좋은지는 말해 준다 — 안 그러면
-                아무도 안 적는다.
-
-                **화자 이야기는 여기서 뺐다.** 이제 화자는 소리로 가른다.
-                여기 사람 이름을 적어도 줄에 안 붙는다 — 그 자리는 위
-                "화자" 패널이다. 이 칸이 그런 약속을 하면 안 된다.
-              */}
-              무슨 자리인지, 무엇에 대한 이야기인지 알면 용어 교정이 크게 좋아집니다. 비워 두어도
-              됩니다. 말한 사람 목록은 여기가 아니라 위 “화자” 에 적습니다.
-            </p>
             <textarea
               value={context}
               onChange={(e) => setContext(e.target.value)}
@@ -241,7 +201,7 @@ export function PolishPanel({
               {editedCount > 0 && (
                 <div className="flex items-center justify-between gap-2">
                   <dt className="text-(--color-fg-4)">직접 고친 줄</dt>
-                  <dd className="text-(--color-fg-3)">{editedCount}줄 — 그대로 둡니다</dd>
+                  <dd className="text-(--color-fg-3)">{editedCount}줄</dd>
                 </div>
               )}
             </dl>
@@ -249,16 +209,13 @@ export function PolishPanel({
             {overflow && (
               /*
                 넘쳤다. **자르지 않는다** — 앞부분만 보내면 뒤쪽 절반이
-                다듬어지지 않은 채 남고 사람은 그 사실을 모른다. 대신 무엇을
-                할 수 있는지를 적는다.
+                다듬어지지 않은 채 남고 사람은 그 사실을 모른다. 그래서 시작
+                단추를 막고 넘친 크기를 적는다.
               */
               <p className="mt-3 flex items-start gap-1.5 rounded-md bg-(--color-danger)/10 px-3 py-2 text-[11px] leading-relaxed break-keep text-(--color-danger) ring-1 ring-(--color-danger)/30">
                 <AlertTriangle className="mt-0.5 h-3 w-3 shrink-0" />
                 <span className="min-w-0">
-                  전사문이 에이전트가 한 번에 받는 크기(512KB)를 {formatBytes(bytes - AGENT_LIMIT)}{" "}
-                  넘습니다. <b className="font-medium">앞부분만 잘라 보내지 않습니다</b> — 그러면
-                  뒷부분이 다듬어지지 않은 채 남고, 그 사실이 화면에 드러나지 않습니다. 녹음을
-                  나눠 올린 뒤 각각 다듬어 주세요.
+                  전사문이 상한(512KB)을 {formatBytes(bytes - AGENT_LIMIT)} 넘습니다
                 </span>
               </p>
             )}
@@ -271,10 +228,6 @@ export function PolishPanel({
             )}
 
             <div className="mt-3 flex items-center justify-end gap-2">
-              <span className="mr-auto text-[10.5px] break-keep text-(--color-fg-4)">
-                다시 돌려도 직접 고친 줄은 안 덮습니다
-                {sessionName && " · 같은 세션의 다른 녹음이 돌고 있으면 차례를 기다립니다"}
-              </span>
               <button
                 type="button"
                 onClick={() => void run()}

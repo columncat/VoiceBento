@@ -402,9 +402,9 @@ export interface RecordingDetailResponse {
    * 계약 밖. **화자 분리 기능 자체**에 대한 고정 안내. 녹음마다 다르지 않다.
    *
    * `ModelNoticeDTO` 와 같은 결이다 — 화면이 손으로 든 숫자를 쓰지 않게
-   * 하려고 서버가 서술자에서 떠서 보낸다. 여기 실리는 것 넷이 다 그런 값이다:
+   * 하려고 서버가 서술자에서 떠서 보낸다. 여기 실리는 것이 다 그런 값이다:
    * 기다림을 어림할 `rtf`, "너무 길다" 를 미리 말할 `maxAudioSeconds`,
-   * 목록을 어떻게 물어야 하는지(`rosterHint`), 그리고 **출처 고지**.
+   * 그리고 **출처 고지**.
    * 고지는 장식이 아니라 의무다 (분할 모델이 MIT 라 저작권 표시를 실어야 한다).
    */
   diar?: DiarNoticeDTO | null;
@@ -436,8 +436,6 @@ export interface DiarNoticeDTO {
   rtf: number | null;
   /** 이보다 긴 소리는 안 나눈다 (초). */
   maxAudioSeconds: number;
-  /** 목록을 어떻게 물어야 하는가. **"모르면 넉넉히 적으세요"** 가 여기 있다. */
-  rosterHint: string;
   /** 목록에 없던 사람에게 붙는 이름. 화면이 이 글자를 지어내면 안 된다. */
   otherLabel: string;
   /**
